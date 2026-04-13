@@ -1,0 +1,20 @@
+.dockerignore
+.gitignore
+Dockerfile
+FILE_TREE.txt
+frontend/
+  .env.example
+  index.html
+  package-lock.json
+  package.json
+  src/
+    App.css
+    App.jsx
+    index.css
+    main.jsx
+  vite.config.js
+main.py
+MANIFEST.md
+README.md
+requirements.txt
+start.py
