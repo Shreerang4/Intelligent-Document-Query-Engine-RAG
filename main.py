@@ -659,6 +659,7 @@ def retrieve_context(
     reranker: Any,
     k_initial: Optional[int] = None,
     k_final: Optional[int] = None,
+    use_reranker: bool = True,
 ) -> Tuple[str, List[ChunkRecord]]:
     """Retrieve relevant context and grounded source chunks for a question."""
     if k_initial is None:
@@ -675,10 +676,13 @@ def retrieve_context(
         logger.info("No retrieved chunks for question: %r", question)
         return "", []
 
-    rerank_pairs = [[question, chunk["text"]] for chunk in retrieved_chunks]
-    rerank_scores = reranker.predict(rerank_pairs)
-    reranked = sorted(zip(retrieved_chunks, rerank_scores), key=lambda item: item[1], reverse=True)
-    selected_chunks = [chunk for chunk, _ in reranked[:k_final]]
+    if use_reranker:
+        rerank_pairs = [[question, chunk["text"]] for chunk in retrieved_chunks]
+        rerank_scores = reranker.predict(rerank_pairs)
+        reranked = sorted(zip(retrieved_chunks, rerank_scores), key=lambda item: item[1], reverse=True)
+        selected_chunks = [chunk for chunk, _ in reranked[:k_final]]
+    else:
+        selected_chunks = retrieved_chunks[:k_final]
 
     logger.info(
         "Retrieved chunk_ids for question %r: %s",

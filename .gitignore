@@ -35,3 +35,6 @@ sample.pdf
 uploads/
 tmp/
 temp/
+
+eval/results/*
+!eval/results/.gitkeep

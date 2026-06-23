@@ -1,0 +1,51 @@
+[
+  {
+    "_note": "PLACEHOLDER — replace document_file with a real PDF under eval/benchmark/docs/ before running the eval harness.",
+    "id": "q001",
+    "document_id": "sample-insurer-annual-2024",
+    "document_file": "eval/benchmark/docs/sample-insurer-annual-2024.pdf",
+    "question": "What was the gross written premium for FY2024?",
+    "answer_type": "answerable",
+    "question_type": "lexical",
+    "expected_answer": "Rs. 21,433 crores",
+    "key_facts": ["21,433", "crores"],
+    "supporting_pages": [12],
+    "supporting_text_hint": "gross written premium of Rs. 21,433 crores"
+  },
+  {
+    "id": "q002",
+    "document_id": "sample-insurer-annual-2024",
+    "document_file": "eval/benchmark/docs/sample-insurer-annual-2024.pdf",
+    "question": "How much money did the company collect from policyholders during the financial year?",
+    "answer_type": "answerable",
+    "question_type": "paraphrase",
+    "expected_answer": "Rs. 21,433 crores",
+    "key_facts": ["21,433", "crores"],
+    "supporting_pages": [12],
+    "supporting_text_hint": "gross written premium of Rs. 21,433 crores"
+  },
+  {
+    "id": "q003",
+    "document_id": "sample-insurer-annual-2024",
+    "document_file": "eval/benchmark/docs/sample-insurer-annual-2024.pdf",
+    "question": "What is the claims settlement ratio for the motor insurance segment in FY2024?",
+    "answer_type": "answerable",
+    "question_type": "distractor",
+    "expected_answer": "98.5%",
+    "key_facts": ["98.5%", "motor"],
+    "supporting_pages": [34, 35],
+    "supporting_text_hint": "claims settlement ratio for the motor segment was 98.5%"
+  },
+  {
+    "id": "q004",
+    "document_id": "sample-insurer-annual-2024",
+    "document_file": "eval/benchmark/docs/sample-insurer-annual-2024.pdf",
+    "question": "What is the company's market share in the mutual fund industry?",
+    "answer_type": "unanswerable",
+    "question_type": "unanswerable",
+    "expected_answer": "",
+    "key_facts": [],
+    "supporting_pages": [],
+    "supporting_text_hint": ""
+  }
+]

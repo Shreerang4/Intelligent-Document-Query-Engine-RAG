@@ -1,0 +1,604 @@
+[
+{
+"id": "infosys_ar_2024_25_q01",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "What total dividend per share did Infosys announce for financial year 2025?",
+"answer_type": "answerable",
+"question_type": "lexical",
+"expected_answer": "Infosys announced a total dividend of `43 per share, including an interim dividend of `21 per share.",
+"key_facts": [
+"43 per share",
+"21 per share"
+],
+"supporting_pages": [
+17
+],
+"supporting_text_hint": "including an interim",
+"source_quote": "Financial year 2025 was another year of strong execution \nfor Infosys. We had growth of 4.2%, operating margin of \n21.1%, and free cash flow of US$4.1 billion. We announced \na total dividend of `43 per share (including an interim \ndividend of `21 per share).",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q02",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "What research and development expense was recognized in the Consolidated Statement of Profit and Loss for the year ended March 31, 2025?",
+"answer_type": "answerable",
+"question_type": "lexical",
+"expected_answer": "₹1,296 crore.",
+"key_facts": [
+"₹1,296 crore"
+],
+"supporting_pages": [
+294
+],
+"supporting_text_hint": "Research and development expense recognized",
+"source_quote": "Research and development expense recognized in the Consolidated Statement of Profit and Loss for the year ended March 31, 2025 and \nMarch 31, 2024 was ₹1,296 crore and ₹1,118 crore respectively.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q03",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "How much cash did Infosys report generating after business operations and investment in assets during FY2025?",
+"answer_type": "answerable",
+"question_type": "paraphrase",
+"expected_answer": "US$4.1 billion.",
+"key_facts": [
+"US$4.1 billion"
+],
+"supporting_pages": [
+17
+],
+"supporting_text_hint": "another year of strong execution",
+"source_quote": "Financial year 2025 was another year of strong execution \nfor Infosys. We had growth of 4.2%, operating margin of \n21.1%, and free cash flow of US$4.1 billion. We announced \na total dividend of `43 per share (including an interim \ndividend of `21 per share).",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q04",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "How many people were included in Infosys's learning outreach efforts?",
+"answer_type": "answerable",
+"question_type": "paraphrase",
+"expected_answer": "13.3 million people.",
+"key_facts": [
+"13.3 million people"
+],
+"supporting_pages": [
+81
+],
+"supporting_text_hint": "initiatives to include 13.3 million people",
+"source_quote": "We have expanded our skilling \ninitiatives to include 13.3 million people.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q05",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "What wording shows Infosys viewed its financial base as resilient rather than debt-heavy?",
+"answer_type": "answerable",
+"question_type": "conceptual",
+"expected_answer": "The report says it has built a \"strong, debt-free, and liquid Balance Sheet.\"",
+"key_facts": [
+"strong, debt-free, and liquid Balance Sheet"
+],
+"supporting_pages": [
+23
+],
+"supporting_text_hint": "strong, debt-free, and liquid Balance Sheet",
+"source_quote": "Our strong performance \non the back of meticulous execution over the years, as reflected in the \ncombination of high growth, strong cash generation and profitability, \nhas led to building a strong, debt-free, and liquid Balance Sheet.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q06",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "For how long had Infosys maintained neutrality across its direct, purchased-energy, and broader value-chain emissions?",
+"answer_type": "answerable",
+"question_type": "conceptual",
+"expected_answer": "For the sixth consecutive year, across scope 1,2 and 3 emissions.",
+"key_facts": [
+"scope 1,2 and 3 emissions",
+"sixth consecutive year"
+],
+"supporting_pages": [
+81
+],
+"supporting_text_hint": "for the sixth consecutive year",
+"source_quote": "We \ncontinue to be carbon neutral across scope 1,2 and 3 emissions \nfor the sixth consecutive year.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q07",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "In the consolidated financial statements, what was the FY2025 total revenue from operations, not software services alone and not products/platforms alone?",
+"answer_type": "answerable",
+"question_type": "distractor",
+"expected_answer": "₹1,62,990 crore.",
+"key_facts": [
+"1,62,990",
+"crore"
+],
+"supporting_pages": [
+321
+],
+"supporting_text_hint": "Total revenue from operations",
+"source_quote": "The Group presents revenues net of indirect taxes in its \nConsolidated Statement of Profit and Loss.\nRevenue from operations for the year ended March 31, 2025 and \nMarch 31, 2024 is as follows:\n(In ₹ crore)\nParticulars\nYear ended March 31,\n2025\n2024\nRevenue from software services\n 1,55,395 \n 1,45,285 \nRevenue from products and platforms\n 7,595 \n 8,385 \nTotal revenue from operations\n 1,62,990 \n 1,53,670 ",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q08",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "In the consolidated note on cash and cash equivalents, what was the FY2025 total cash and cash equivalents?",
+"answer_type": "answerable",
+"question_type": "distractor",
+"expected_answer": "₹24,455 crore.",
+"key_facts": [
+"24,455",
+"crore"
+],
+"supporting_pages": [
+298
+],
+"supporting_text_hint": "Total cash and cash equivalents",
+"source_quote": "2.9 Cash and cash equivalents\n(In ₹ crore)\nParticulars\nAs at March 31, \n2025\n2024\nBalances with banks\n \n \nIn current and deposit accounts \n 24,455 \n 14,786 \nCash on hand\n–\n–\nTotal cash and cash equivalents\n 24,455 \n 14,786 ",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q09",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "What revenue growth guidance did Infosys issue for FY2025-26?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q10",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "What was TCS's revenue from operations for FY2025?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "infosys_ar_2024_25_q11",
+"document_id": "infosys_ar_2024_25",
+"document_file": "eval/benchmark/docs/infosys_ar_2024_25.pdf",
+"question": "What is Salil Parekh's personal residential address?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q01",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "How much faster did HDFC Bank say its deposits grew than loans?",
+"answer_type": "answerable",
+"question_type": "lexical",
+"expected_answer": "Deposits grew 2.5 times faster than loans.",
+"key_facts": [
+"2.5"
+],
+"supporting_pages": [
+15
+],
+"supporting_text_hint": "times faster than loans",
+"source_quote": "As is evident, our deposits grew 2.5 \ntimes faster than loans.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q02",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "What was the Capital Adequacy Ratio in FY25?",
+"answer_type": "answerable",
+"question_type": "lexical",
+"expected_answer": "19.6 per cent.",
+"key_facts": [
+"19.6 per cent"
+],
+"supporting_pages": [
+38
+],
+"supporting_text_hint": "a Capital Adequacy Ratio of",
+"source_quote": "The Bank remains well-capitalised, reﬂected in \na Capital Adequacy Ratio of 19.6 per cent.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q03",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "How much did the Bank put toward social responsibility work during the financial year?",
+"answer_type": "answerable",
+"question_type": "paraphrase",
+"expected_answer": "1,068.03 crore.",
+"key_facts": [
+"1,068.03 crore"
+],
+"supporting_pages": [
+205
+],
+"supporting_text_hint": "CSR Spend",
+"source_quote": "CSR Spend\n` 1,068.03 crore \nIn the Financial Year 2024-25",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q04",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "How large was HDFC Bank's regular workforce as of March 31, 2025?",
+"answer_type": "answerable",
+"question_type": "paraphrase",
+"expected_answer": "2,14,521.",
+"key_facts": [
+"2,14,521"
+],
+"supporting_pages": [
+265
+],
+"supporting_text_hint": "employees on the rolls of the Bank",
+"source_quote": "As of March 31, 2025, the number of permanent \nemployees on the rolls of the Bank was 2,14,521.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q05",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "What percentage indicates how much protection the Bank had set aside against possible credit losses?",
+"answer_type": "answerable",
+"question_type": "conceptual",
+"expected_answer": "The Provision Coverage Ratio was 67.86 per cent.",
+"key_facts": [
+"67.86 per cent"
+],
+"supporting_pages": [
+38
+],
+"supporting_text_hint": "Provision Coverage Ratio of",
+"source_quote": "As a \nresponsible bank, it has built a substantial cushion \nagainst any adverse impact with a Provision \nCoverage Ratio of 67.86 per cent.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q06",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "By which fiscal year does HDFC Bank want its own operations to stop adding net carbon impact?",
+"answer_type": "answerable",
+"question_type": "conceptual",
+"expected_answer": "FY32.",
+"key_facts": [
+"FY32"
+],
+"supporting_pages": [
+3
+],
+"supporting_text_hint": "become carbon-neutral",
+"source_quote": "Our goal is clear: To become carbon-neutral \nin our operations by FY32.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q07",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "In the consolidated profit and loss account, what was the net profit attributable to the group for FY2025, excluding the before-minority-interest figure?",
+"answer_type": "answerable",
+"question_type": "distractor",
+"expected_answer": "70,792.25 crore.",
+"key_facts": [
+"70,792.25",
+"crore"
+],
+"supporting_pages": [
+442
+],
+"supporting_text_hint": "Consolidated Net Profit for the year attributable",
+"source_quote": "C in crore\nConsolidated Net Profit for the year attributable to the group\n 70,792.25 \n 64,062.04",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q08",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "In Schedule 3's consolidated branch split, what was the total deposits amount after separating India and outside-India branches?",
+"answer_type": "answerable",
+"question_type": "distractor",
+"expected_answer": "2,710,898.23 crore.",
+"key_facts": [
+"2,710,898.23",
+"crore"
+],
+"supporting_pages": [
+447
+],
+"supporting_text_hint": "Deposits of branches outside India",
+"source_quote": "SCHEDULE 3 - DEPOSITS\nC in crore\nB.  I.   Deposits of branches in India\n 2,686,792.91 \n 2,354,694.75 \n     II.  Deposits of branches outside India\n 24,105.32 \n 22,192.53 \n \nTotal\n 2,710,898.23 \n 2,376,887.28",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q09",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "What exact branch expansion target did HDFC Bank set for FY2025-26?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q10",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "What was ICICI Bank's gross NPA ratio for FY2025?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "hdfc_bank_ar_2024_25_q11",
+"document_id": "hdfc_bank_ar_2024_25",
+"document_file": "eval/benchmark/docs/hdfc_bank_ar_2024_25.pdf",
+"question": "What is Sashidhar Jagdishan's personal mobile phone number?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q01",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "What was Bajaj Finance's assets under management AUM in FY2025?",
+"answer_type": "answerable",
+"question_type": "lexical",
+"expected_answer": "416,661 crore.",
+"key_facts": [
+"416,661",
+"crore"
+],
+"supporting_pages": [
+7
+],
+"supporting_text_hint": "of its assets under management",
+"source_quote": "BFL achieved a growth of 26% of its assets under management (AUM) — increasing from H 330,615 crore in FY2024 to H 416,661 crore in FY2025.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q02",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "What were BFL's loan losses provisions for FY2025?",
+"answer_type": "answerable",
+"question_type": "lexical",
+"expected_answer": "7,966 crore.",
+"key_facts": [
+"7,966",
+"crore"
+],
+"supporting_pages": [
+7
+],
+"supporting_text_hint": "loan losses provisions for",
+"source_quote": "BFL’s loan losses provisions for FY2025 were H 7,966 crore, an increase of 72% from H 4,631 crore in FY2024.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q03",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "How many people were in Bajaj Finance's user base by FY2025?",
+"answer_type": "answerable",
+"question_type": "paraphrase",
+"expected_answer": "Over 101.82 million customers.",
+"key_facts": [
+"101.82 million"
+],
+"supporting_pages": [
+7
+],
+"supporting_text_hint": "customer franchise expanded by",
+"source_quote": "Your Company’s customer franchise expanded by 22%, now reaching over 101.82 million customers.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q04",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "How many fresh credit contracts did the company originate during FY2025?",
+"answer_type": "answerable",
+"question_type": "paraphrase",
+"expected_answer": "43.42 million.",
+"key_facts": [
+"43.42 million"
+],
+"supporting_pages": [
+7
+],
+"supporting_text_hint": "number of new loans booked",
+"source_quote": "The number of new loans booked was 43.42 million.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q05",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "What figure shows BFL had a strong regulatory cushion among large non bank lenders?",
+"answer_type": "answerable",
+"question_type": "conceptual",
+"expected_answer": "21.93.",
+"key_facts": [
+"21.93"
+],
+"supporting_pages": [
+111
+],
+"supporting_text_hint": "among the best capitalised large NBFCs",
+"source_quote": "It remains well capitalised with a capital-to-risk weighted asset ratio ('CRAR') of 21.93% as on 31 March 2025 — making it among the best capitalised large NBFCs in India.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q06",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "Which figures indicate that troubled credit stayed very low for the company?",
+"answer_type": "answerable",
+"question_type": "conceptual",
+"expected_answer": "Consolidated gross NPA was 0.96 and net NPA was 0.44.",
+"key_facts": [
+"0.96",
+"0.44"
+],
+"supporting_pages": [
+32
+],
+"supporting_text_hint": "consolidated gross NPA at 0.96% and net NPA at 0.44% were amongst the lowest",
+"source_quote": "As on 31 March 2025, BFL’s consolidated gross NPA at 0.96% and net NPA at 0.44% were amongst the lowest in the industry. This validates BFL’s deeply embedded risk culture and robust risk management practices which have ensured that despite the volatile economic environment, BFL’s NPA as on 31 March 2025 stood at the best levels in its history.",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q07",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "In the consolidated statement of profit and loss, what was total revenue from operations for FY2025, not interest income or fees and commission income?",
+"answer_type": "answerable",
+"question_type": "distractor",
+"expected_answer": "69,683.51 crore.",
+"key_facts": [
+"69,683.51",
+"crore"
+],
+"supporting_pages": [
+370
+],
+"supporting_text_hint": "Total revenue from operations",
+"source_quote": "Consolidated Statement of Profit and Loss\n(C in crore)\nTotal revenue from operations\n69,683.51\n54,973.89",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q08",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "In the consolidated balance sheet, what was total liabilities and equity as at 31 March 2025, not total equity alone?",
+"answer_type": "answerable",
+"question_type": "distractor",
+"expected_answer": "466,126.83 crore.",
+"key_facts": [
+"466,126.83",
+"crore"
+],
+"supporting_pages": [
+369
+],
+"supporting_text_hint": "Total liabilities and equity",
+"source_quote": "Consolidated Balance Sheet (Contd.)\n(C in crore)\nTotal liabilities and equity\n466,126.83\n375,741.62",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q09",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "What exact profit after tax forecast did Bajaj Finance give for FY2026?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q10",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "What was Shriram Finance's assets under management for FY2025?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+},
+{
+"id": "bajaj_finance_ar_2024_25_q11",
+"document_id": "bajaj_finance_ar_2024_25",
+"document_file": "eval/benchmark/docs/bajaj_finance_ar_2024_25.pdf",
+"question": "What is Anup Saha's personal residential address?",
+"answer_type": "unanswerable",
+"question_type": "unanswerable",
+"expected_answer": "Not found in this document.",
+"key_facts": [],
+"supporting_pages": [],
+"supporting_text_hint": "",
+"source_quote": "",
+"confidence": "high",
+"note": ""
+}
+]
