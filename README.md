@@ -1,4 +1,4 @@
-# Intelligent Document Query Engine — Full-Stack RAG Document QA Platform
+# Intelligent Document Query Engine - Full-Stack RAG Document QA
 
 Live demo: https://shreerangss-intelligent-document-query-engine.hf.space/
 
@@ -6,31 +6,30 @@ GitHub repo: https://github.com/Shreerang4/Intelligent-Document-Query-Engine-RAG
 
 ## Overview
 
-Intelligent Document Query Engine is a full-stack PDF question-answering platform deployed as a Hugging Face Docker Space. It combines a React/Vite frontend with a FastAPI backend that ingests PDFs from either a public URL or a local upload, extracts text with PyMuPDF, builds an in-memory vector index, retrieves and reranks relevant chunks, and asks Groq to generate source-grounded answers.
+Intelligent Document Query Engine is a full-stack PDF RAG application with an evaluated retrieval pipeline. It combines a React/Vite frontend with a FastAPI backend that ingests PDFs from a URL or upload, chunks extracted text, retrieves relevant evidence, reranks it, and asks Groq to generate source-grounded answers with page/chunk citations and claim verification.
 
-FastAPI serves both the API and the built React app from the same container in production. The live UI supports entering a bearer token, choosing PDF URL or upload mode, submitting one question per line, checking backend health, and reviewing answers with page/chunk source excerpts and claim verification details.
+The current production default remains MiniLM for cost and speed. E5-small-v2 is integrated behind configuration and is the best evaluated retrieval-quality candidate so far.
 
 ## Features
 
-- React/Vite single-page UI for PDF URL ingestion and PDF upload.
+- React/Vite UI for PDF URL ingestion and PDF upload.
 - FastAPI API with bearer-token protection for query endpoints.
-- PDF download with content-type and size validation.
-- PDF upload validation by MIME type or `.pdf` filename.
-- PyMuPDF text extraction with cleanup for low-value extraction artifacts.
-- Page-aware text chunking with `RecursiveCharacterTextSplitter` using 500-character chunks and 50-character overlap.
-- MiniLM embeddings through `langchain-huggingface`, defaulting to `all-MiniLM-L6-v2`.
-- In-memory FAISS `IndexFlatL2` vector search.
-- In-memory document cache for URL and upload inputs, with TTL/LRU eviction and cache status response headers.
+- PDF validation, download/upload handling, and PyMuPDF text extraction.
+- Page-aware chunking with 500-character chunks and 50-character overlap.
+- Configurable embeddings through `EMBEDDING_MODEL_NAME`.
+- MiniLM baseline/default: `all-MiniLM-L6-v2`.
+- E5-small-v2 candidate: `intfloat/e5-small-v2` with correct `passage:` and `query:` prefixes.
+- In-memory FAISS vector search and embedding-aware document cache keys.
+- BM25 and E5+BM25 hybrid retrieval experiments behind `RETRIEVAL_MODE`.
 - CrossEncoder reranking, defaulting to `cross-encoder/ms-marco-TinyBERT-L-2-v2`.
 - Groq LLM answer generation, defaulting to `llama-3.1-8b-instant`.
-- Source-grounded answer response with page number, chunk id, and excerpts.
-- Claim extraction and claim verification against retrieved evidence.
-- `/health` endpoint reporting cache size and lazy-loaded model/client status.
-- FastAPI static serving for the built frontend under `/` and `/assets`.
+- Source-grounded responses with page number, chunk id, and excerpts.
+- Claim extraction and verification against retrieved evidence.
+- Retrieval evaluation harness with benchmark reports and targeted probes.
 
-## Architecture Flow
+## Architecture
 
-`React UI → FastAPI API → PDF upload/URL ingestion → PyMuPDF extraction → chunking → MiniLM embeddings → FAISS retrieval/cache → CrossEncoder reranking → Groq LLM → source-grounded answer`
+`React UI -> FastAPI API -> PDF upload/URL ingestion -> PyMuPDF extraction -> chunking -> configurable embeddings -> FAISS/BM25 retrieval experiments -> CrossEncoder reranking -> Groq LLM -> source-grounded answers + claim verification`
 
 ```mermaid
 flowchart LR
@@ -41,80 +40,76 @@ flowchart LR
     D --> F[PyMuPDF extraction]
     E --> F
     F --> G[Text cleanup and chunking]
-    G --> H[MiniLM embeddings]
-    H --> I[FAISS retrieval and document cache]
-    I --> J[CrossEncoder reranking]
-    J --> K[Groq LLM answer generation]
-    K --> L[Claim extraction and verification]
-    L --> M[Source-grounded answer with excerpts]
+    G --> H[Configurable embeddings]
+    H --> I[FAISS retrieval]
+    G --> J[BM25 lexical retrieval]
+    I --> K[CrossEncoder reranking]
+    J --> K
+    K --> L[Groq LLM answer generation]
+    L --> M[Claim verification]
+    M --> N[Source-grounded answer with excerpts]
 ```
 
-## Tech Stack
+## Retrieval Evaluation
 
-- Frontend: React 18, Vite 5, plain CSS.
-- Backend: FastAPI, Uvicorn, Pydantic, python-dotenv.
-- PDF processing: PyMuPDF.
-- Retrieval: LangChain text splitter, `langchain-huggingface`, Sentence Transformers, FAISS CPU, NumPy.
-- Reranking: Sentence Transformers CrossEncoder.
-- LLM: Groq Python SDK.
-- HTTP/PDF URL fetch: httpx.
-- Deployment: Docker multi-stage build, Hugging Face Docker Space on port `7860`.
+The retrieval pipeline was evaluated on a fixed financial-document benchmark:
 
-## Project Structure
+- 33 labeled questions across Infosys, HDFC Bank, and Bajaj Finance annual reports.
+- Question types: lexical, paraphrase, conceptual, and distractor.
+- Metrics: Recall@3, Recall@5, MRR, needs_review count, retrieval latency, and ingestion/indexing time.
+- Evaluation mode: retrieval-only, no LLM answer generation.
 
-```text
-.
-├── Dockerfile
-├── README.md
-├── main.py
-├── requirements.txt
-├── start.py
-├── frontend/
-│   ├── .env.example
-│   ├── index.html
-│   ├── package.json
-│   ├── package-lock.json
-│   ├── vite.config.js
-│   └── src/
-│       ├── App.jsx
-│       ├── App.css
-│       ├── index.css
-│       └── main.jsx
-├── .dockerignore
-├── .gitignore
-├── FILE_TREE.txt
-└── MANIFEST.md
-```
+Final retrieval metrics:
 
-## Environment Variables
+| Configuration | R@3 | R@5 | MRR | needs_review | p50 | p95 | ingest/index time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| MiniLM | 54.2% | 62.5% | 0.474 | 7 | 56 ms | 144 ms | 230.8s |
+| E5-small-v2 | 58.3% | 70.8% | 0.496 | 4 | 73 ms | 156 ms | 534.0s |
+| E5+BM25 hybrid | 58.3% | 70.8% | 0.504 | 5 | 216 ms | 527 ms | 510.0s |
+
+Decision summary:
+
+- E5-small-v2 improves retrieval quality over the MiniLM baseline, raising R@5 from 62.5% to 70.8% and reducing needs_review from 7 to 4.
+- E5-small-v2 is especially helpful on paraphrase and conceptual questions.
+- E5+BM25 hybrid rescued one exact table case but did not improve R@5, increased needs_review from 4 to 5, and tripled p50 retrieval latency, so it remains a documented ablation rather than the default.
+- Larger embedding candidates were rejected for this environment: GTE was slower and worse than E5, and Qwen3-0.6B CPU ingestion was impractically slow.
+- Remaining misses are documented limitations around table extraction, candidate-pool size, reranker ordering, and benchmark hit criteria.
+
+See [docs/retrieval_evaluation.md](docs/retrieval_evaluation.md) for the detailed evaluation summary.
+
+## Configuration
 
 Backend variables referenced by the code:
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `API_TOKEN` | Yes | none | Bearer token required by `/hackrx/run` and `/hackrx/upload-run`. |
-| `GROQ_API_KEY` | Yes | none | Used by the Groq SDK when `Groq()` is created for answer generation and claim verification. |
+| `GROQ_API_KEY` | Yes | none | Used by the Groq SDK for answer generation and claim verification. |
 | `PORT` | No | `7860` | Uvicorn port used by `start.py`. |
 | `MAX_PDF_BYTES` | No | `15728640` | Maximum PDF size in bytes. |
 | `HTTP_TIMEOUT_SECONDS` | No | `30` | Timeout for PDF URL downloads. |
-| `RETRIEVAL_K_INITIAL` | No | `8` | Initial FAISS retrieval count before reranking. |
-| `RETRIEVAL_K_FINAL` | No | `3` | Final chunk count after reranking. |
+| `RETRIEVAL_K_INITIAL` | No | `8` | Initial FAISS retrieval count before reranking in the app path. |
+| `RETRIEVAL_K_FINAL` | No | `3` | Final chunk count after reranking in the app path. |
+| `RETRIEVAL_MODE` | No | `faiss_reranker` | Retrieval path. Experimental option: `e5_bm25_reranker`. |
+| `HYBRID_E5_K_INITIAL` | No | `30` | E5 candidate count for the hybrid experiment. |
+| `HYBRID_BM25_K_INITIAL` | No | `20` | BM25 candidate count for the hybrid experiment. |
+| `HYBRID_K_FINAL` | No | `5` | Final reranked chunk count for the hybrid experiment. |
 | `MAX_CONCURRENT_QUESTIONS` | No | `4` | Concurrent question processing limit. |
 | `DOCUMENT_CACHE_MAX_ITEMS` | No | `8` | Maximum number of cached document indexes. |
 | `DOCUMENT_CACHE_TTL_SECONDS` | No | `3600` | Document cache TTL in seconds. |
-| `EMBEDDING_MODEL_NAME` | No | `all-MiniLM-L6-v2` | Hugging Face embedding model name. |
+| `EMBEDDING_MODEL_NAME` | No | `all-MiniLM-L6-v2` | Hugging Face embedding model name. Set `intfloat/e5-small-v2` to test E5. |
 | `RERANKER_MODEL_NAME` | No | `cross-encoder/ms-marco-TinyBERT-L-2-v2` | CrossEncoder reranker model name. |
 | `LLM_MODEL_NAME` | No | `llama-3.1-8b-instant` | Groq model name. |
 
-Frontend variable from `frontend/.env.example` and `frontend/src/App.jsx`:
+Frontend variable:
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `VITE_API_BASE_URL` | No | same origin | Optional API base URL for local Vite development. The example file points to `http://127.0.0.1:8000`; use the port where your backend is running. |
+| `VITE_API_BASE_URL` | No | same origin | Optional API base URL for local Vite development. |
 
 ## Local Development
 
-### Backend
+Backend:
 
 ```powershell
 py -m venv .venv
@@ -128,9 +123,7 @@ $env:PORT="7860"
 py start.py
 ```
 
-The backend will be available at `http://127.0.0.1:7860`.
-
-### Frontend
+Frontend:
 
 ```powershell
 cd frontend
@@ -139,11 +132,37 @@ npm install
 npm run dev
 ```
 
-For local Vite development, set `VITE_API_BASE_URL` in `frontend/.env` to the backend URL, for example `http://127.0.0.1:7860` if you use `py start.py`.
+For local Vite development, set `VITE_API_BASE_URL` in `frontend/.env` to the backend URL.
+
+## Evaluation Commands
+
+MiniLM baseline:
+
+```powershell
+$env:EMBEDDING_MODEL_NAME='all-MiniLM-L6-v2'
+.venv\Scripts\python.exe eval\runner.py --no-llm --out eval\results\stage2d_minilm
+```
+
+E5-small-v2:
+
+```powershell
+$env:EMBEDDING_MODEL_NAME='intfloat/e5-small-v2'
+.venv\Scripts\python.exe eval\runner.py --no-llm --out eval\results\stage2d_e5_small_v2
+```
+
+E5+BM25 hybrid ablation:
+
+```powershell
+$env:EMBEDDING_MODEL_NAME='intfloat/e5-small-v2'
+$env:RETRIEVAL_MODE='e5_bm25_reranker'
+.venv\Scripts\python.exe eval\runner.py --no-llm --out eval\results\stage2e_e5_bm25_hybrid
+```
+
+Generated files under `eval/results/` are ignored by git. Commit lightweight summaries under `docs/` instead.
 
 ## Docker / Hugging Face Spaces Deployment
 
-The Dockerfile builds the frontend with Node 20, then creates a Python 3.11 runtime image. It installs `libgomp1`, CPU-only PyTorch, Python dependencies, copies the app, copies the built frontend into `frontend/dist`, exposes port `7860`, and runs `python start.py`.
+The Dockerfile builds the frontend with Node 20, then creates a Python runtime image. It installs CPU-only PyTorch and Python dependencies, copies the built frontend into `frontend/dist`, exposes port `7860`, and runs `python start.py`.
 
 Build and run locally:
 
@@ -206,51 +225,33 @@ Multipart form fields:
 
 Returns service status, app version, cache entry count, and whether the embedding model, reranker, and Groq client have been loaded.
 
-Example fields:
-
-```json
-{
-  "status": "healthy",
-  "version": "2.3.0",
-  "cache_entries": 0,
-  "embedding_model_loaded": false,
-  "reranker_loaded": false,
-  "groq_client_loaded": false
-}
-```
-
-### Frontend Routes
-
-- `GET /`: serves `frontend/dist/index.html` when the frontend has been built.
-- `GET /assets/*`: serves built frontend assets.
-- `GET /{full_path:path}`: supports SPA fallback for non-API paths.
-
 ## Security Notes
 
 - Do not commit `.env`, `.env.local`, or real API keys.
 - Store `GROQ_API_KEY` and `API_TOKEN` as Hugging Face Space secrets in production.
 - Query endpoints require `Authorization: Bearer <API_TOKEN>`.
-- The frontend asks the user to paste the bearer token; it is sent with requests but is not stored in the codebase.
-- The document cache is in-memory only and is keyed by a SHA-256 hash of the URL or uploaded PDF bytes.
-- The URL ingestion endpoint downloads remote PDFs from caller-provided URLs, so deployment environments should consider network egress and SSRF risk policies.
+- Document indexes and model clients are process-local and in memory.
+- URL ingestion downloads caller-provided PDFs, so deployment environments should consider network egress and SSRF risk policies.
 
-## Limitations / Future Work
+## Limitations
 
-- Automated tests are not currently present in the repository.
-- The cache is process-local memory and is cleared on container restart.
-- PDF extraction depends on embedded text; scanned/image-only PDFs are not OCR-processed by this code.
+- Cache is process-local memory and is cleared on container restart.
+- PDF extraction depends on embedded text; scanned/image-only PDFs are not OCR-processed.
 - FAISS indexes are rebuilt per uncached document and are not persisted to disk.
 - There is no user account system or per-user document isolation in the current code.
 - The frontend uses a manually entered bearer token rather than an authenticated session flow.
+- Retrieval quality is improved but not perfect; remaining misses are documented in the benchmark summary.
 
-## Testing
+## Lightweight Checks
 
-No automated test files are currently present. Although pytest dependencies are listed in `requirements.txt`, automated tests are planned rather than implemented.
-
-Manual smoke checks:
+Compile changed Python files:
 
 ```powershell
-py start.py
+.venv\Scripts\python.exe -m py_compile main.py eval\pipeline_adapter.py eval\runner.py eval\smoke_test.py
 ```
 
-Then open `http://127.0.0.1:7860/health` or use the React UI after building the frontend.
+Run the metric unit tests:
+
+```powershell
+.venv\Scripts\python.exe -m pytest eval\test_metrics.py -q
+```
