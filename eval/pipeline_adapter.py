@@ -95,13 +95,18 @@ def query(
         answer is not None and pipeline._is_non_informative_answer(answer)
     )
 
+    source_chunks = []
+    for chunk in raw_chunks:
+        source_chunk = {"text": chunk["text"], "page": chunk["page"], "chunk_id": chunk["chunk_id"]}
+        for key in ("retrieval_sources", "e5_rank", "bm25_rank", "reranker_score"):
+            if key in chunk:
+                source_chunk[key] = chunk[key]
+        source_chunks.append(source_chunk)
+
     return {
         "answer": answer,
         "abstained": abstained,
-        "source_chunks": [
-            {"text": c["text"], "page": c["page"], "chunk_id": c["chunk_id"]}
-            for c in raw_chunks
-        ],
+        "source_chunks": source_chunks,
         "latency": {
             "retrieval_s": retrieval_s,
             "llm_s": llm_s,

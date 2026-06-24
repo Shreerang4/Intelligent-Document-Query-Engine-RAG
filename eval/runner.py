@@ -40,6 +40,7 @@ _GROQ_KEY_PRESENT = bool(os.environ.get("GROQ_API_KEY"))
 
 from eval.pipeline_adapter import ingest_document, query as _adapter_query
 from eval.bm25_retriever import bm25_search
+from eval.prf_retriever import prf_query as _prf_query
 from eval.metrics import (
     is_retrieval_hit,
     recall_at_k,
@@ -50,7 +51,10 @@ from eval.metrics import (
     latency_percentiles,
 )
 
-_MODES = ("faiss_reranker", "faiss_only", "bm25")
+_PRIMARY_MODE = os.environ.get("RETRIEVAL_MODE", "faiss_reranker").strip().lower()
+if _PRIMARY_MODE == "e5":
+    _PRIMARY_MODE = "faiss_reranker"
+_MODES = (_PRIMARY_MODE, "faiss_only", "bm25")
 
 
 # ── PDF resolution ─────────────────────────────────────────────────────────────
@@ -116,6 +120,7 @@ def _run_doc(
     pdf_path: Path,
     run_llm: bool,
     llm_delay: float = 0.0,
+    run_prf: bool = False,
 ) -> Tuple[List[Dict], Dict[str, List[float]]]:
     """Ingest one PDF, run all three modes for every question.
 
@@ -143,7 +148,7 @@ def _run_doc(
         r1_retr_ms = r1["latency"]["retrieval_s"] * 1000
         r1_llm_ms = r1["latency"]["llm_s"] * 1000 if run_llm else None
         records.append(_make_record(
-            q, "faiss_reranker", r1["source_chunks"],
+            q, _PRIMARY_MODE, r1["source_chunks"],
             r1["abstained"], r1["answer"],
             r1_retr_ms, r1_llm_ms,
         ))
@@ -170,6 +175,21 @@ def _run_doc(
             len(bm25_chunks) == 0, None,
             bm25_retr_ms, None,
         ))
+
+        # ── faiss_reranker_prf (answerable only) ──────────────────────────────
+        if run_prf and q["answer_type"] == "answerable":
+            prf_result = _prf_query(question, chunks, faiss_index)
+            prf_total_ms = prf_result["latency"]["total_s"] * 1000
+            prf_rec = _make_record(
+                q, "faiss_reranker_prf", prf_result["ranked_chunks"],
+                False, None, prf_total_ms, None,
+            )
+            prf_rec["prf_variants"] = prf_result["variants"]
+            prf_rec["prf_fallback_fired"] = prf_result["fallback_fired"]
+            prf_rec["prf_latency"] = prf_result["latency"]
+            records.append(prf_rec)
+            if llm_delay > 0:
+                time.sleep(llm_delay)  # pace the PRF expansion LLM call
 
     return records, {"cold_ms": cold_ms, "warm_ms": warm_ms}
 
@@ -207,7 +227,7 @@ def _compute_metrics(records: List[Dict], llm_active: bool) -> Dict[str, Any]:
         }
 
         # LLM quality — faiss_reranker only, and only when LLM actually ran
-        if mode == "faiss_reranker" and llm_active:
+        if mode == _PRIMARY_MODE and llm_active:
             llm_lats = [r["llm_latency_ms"] for r in mode_recs
                         if r["llm_latency_ms"] is not None]
             mode_entry["llm"] = {
@@ -245,6 +265,168 @@ def _needs_review(records: List[Dict]) -> List[Dict]:
                 "supporting_text_hint": ref["supporting_text_hint"],
             })
     return result
+
+
+# ── PRF metric aggregation ────────────────────────────────────────────────────
+def _compute_prf_metrics(records: List[Dict]) -> Dict[str, Any]:
+    prf_recs = [r for r in records if r["mode"] == "faiss_reranker_prf"]
+    answerable = [r for r in prf_recs if r["answer_type"] == "answerable"]
+
+    qtypes = sorted({r["question_type"] for r in answerable})
+    by_type: Dict[str, Any] = {}
+    for qt in qtypes:
+        qt_recs = [r for r in answerable if r["question_type"] == qt]
+        by_type[qt] = {
+            "n": len(qt_recs),
+            "recall_at_3": recall_at_k(qt_recs, 3),
+            "recall_at_5": recall_at_k(qt_recs, 5),
+            "mrr": mrr(qt_recs),
+        }
+
+    latencies = [r["retrieval_latency_ms"] for r in prf_recs]
+    fallback_count = sum(1 for r in prf_recs if r.get("prf_fallback_fired", False))
+
+    return {
+        "n_questions": len(prf_recs),
+        "retrieval": {
+            "recall_at_3": recall_at_k(answerable, 3),
+            "recall_at_5": recall_at_k(answerable, 5),
+            "mrr": mrr(answerable),
+            "by_question_type": by_type,
+        },
+        "latency": latency_percentiles(latencies),
+        "fallback_count": fallback_count,
+    }
+
+
+def _prf_detail_for_ids(records: List[Dict], qids: List[str]) -> List[Dict]:
+    """Per-question PRF result for a list of question IDs."""
+    result: List[Dict] = []
+    for qid in qids:
+        prf_rec = next(
+            (r for r in records if r["id"] == qid and r["mode"] == "faiss_reranker_prf"),
+            None,
+        )
+        if prf_rec is None:
+            continue
+        hit3 = any(is_retrieval_hit(c, prf_rec) for c in prf_rec["ranked_chunks"][:3])
+        hit5 = any(is_retrieval_hit(c, prf_rec) for c in prf_rec["ranked_chunks"][:5])
+        result.append({
+            "id": qid,
+            "question": prf_rec["question_text"],
+            "question_type": prf_rec["question_type"],
+            "hit_at_3": hit3,
+            "hit_at_5": hit5,
+            "variants": prf_rec.get("prf_variants", []),
+            "fallback_fired": prf_rec.get("prf_fallback_fired", False),
+        })
+    return result
+
+
+# ── PRF Markdown report ────────────────────────────────────────────────────────
+def _md_prf_report(
+    prf_metrics: Dict[str, Any],
+    baseline_metrics: Dict[str, Any],
+    prf_detail: List[Dict],
+    meta: Dict[str, Any],
+) -> str:
+    lines: List[str] = []
+
+    def h(level: int, text: str) -> None:
+        lines.append(f"\n{'#' * level} {text}")
+
+    def delta(prf_v: float, base_v: float) -> str:
+        d = prf_v - base_v
+        sign = "+" if d >= 0 else ""
+        return f"{sign}{d:.1%}"
+
+    h(1, "PRF Evaluation Report (Pseudo-Relevance-Feedback)")
+    lines.append("")
+    lines.append(f"**Run date:** {meta['run_date']}")
+    lines.append(f"**Questions:** {meta['n_questions']} total; PRF evaluated on "
+                 f"{prf_metrics['n_questions']} answerable question(s)")
+    lines.append(f"**LLM (Groq):** {'ON' if meta['llm_on'] else 'OFF — retrieval metrics only'}")
+    lines.append(f"**PRF expansion model:** llama-3.1-8b-instant (3 variants per question)")
+    lines.append(f"**PRF fallback fires:** {prf_metrics['fallback_count']} / "
+                 f"{prf_metrics['n_questions']} questions used original query only")
+    lines.append("")
+    lines.append("> PRF latency is **sequential**: Round-1 FAISS+rerank + expansion LLM call "
+                 "+ Round-2 multi-query FAISS+rerank + merged-pool CrossEncoder rerank.")
+
+    # ── Side-by-side per question type ─────────────────────────────────────────
+    h(2, "Side-by-Side Retrieval: faiss_reranker (baseline) vs faiss_reranker_prf")
+    lines.append("")
+    lines.append("| Question Type | n | Base R@3 | PRF R@3 | Delta | "
+                 "Base R@5 | PRF R@5 | Delta | Base MRR | PRF MRR | Delta |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+
+    base_by_type = baseline_metrics["retrieval"]["by_question_type"]
+    prf_by_type = prf_metrics["retrieval"]["by_question_type"]
+    for qt in sorted(set(base_by_type) | set(prf_by_type)):
+        bv = base_by_type.get(qt, {"n": 0, "recall_at_3": 0.0, "recall_at_5": 0.0, "mrr": 0.0})
+        pv = prf_by_type.get(qt, {"n": 0, "recall_at_3": 0.0, "recall_at_5": 0.0, "mrr": 0.0})
+        n = bv["n"] or pv["n"]
+        lines.append(
+            f"| {qt} | {n} "
+            f"| {_pct(bv['recall_at_3'])} | {_pct(pv['recall_at_3'])} | {delta(pv['recall_at_3'], bv['recall_at_3'])} "
+            f"| {_pct(bv['recall_at_5'])} | {_pct(pv['recall_at_5'])} | {delta(pv['recall_at_5'], bv['recall_at_5'])} "
+            f"| {bv['mrr']:.3f} | {pv['mrr']:.3f} | {delta(pv['mrr'], bv['mrr'])} |"
+        )
+    # Overall row
+    br = baseline_metrics["retrieval"]
+    pr = prf_metrics["retrieval"]
+    n_total = prf_metrics["n_questions"]
+    lines.append(
+        f"| **OVERALL** | **{n_total}** "
+        f"| **{_pct(br['recall_at_3'])}** | **{_pct(pr['recall_at_3'])}** | **{delta(pr['recall_at_3'], br['recall_at_3'])}** "
+        f"| **{_pct(br['recall_at_5'])}** | **{_pct(pr['recall_at_5'])}** | **{delta(pr['recall_at_5'], br['recall_at_5'])}** "
+        f"| **{br['mrr']:.3f}** | **{pr['mrr']:.3f}** | **{delta(pr['mrr'], br['mrr'])}** |"
+    )
+
+    # ── Latency ────────────────────────────────────────────────────────────────
+    h(2, "Latency")
+    lines.append("")
+    prf_lat = prf_metrics["latency"]
+    base_lat = baseline_metrics["latency"]
+    lines.append("| Mode | p50 | p95 | n |")
+    lines.append("|------|-----|-----|---|")
+    lines.append(f"| faiss_reranker (baseline retrieval only) "
+                 f"| {_ms(base_lat['p50'])} | {_ms(base_lat['p95'])} | {base_lat['n']} |")
+    lines.append(f"| faiss_reranker_prf (total: R1 + expand + R2) "
+                 f"| {_ms(prf_lat['p50'])} | {_ms(prf_lat['p95'])} | {prf_lat['n']} |")
+
+    # ── Per-question PRF results for previously-failing questions ───────────────
+    h(2, "PRF Results for Previously-Failing Questions (baseline needs_review)")
+    lines.append("")
+    if not prf_detail:
+        lines.append("_No PRF records for needs_review questions (run --prf with answerable questions)._")
+    else:
+        lines.append("| id | type | PRF hit@3 | PRF hit@5 | Fallback |")
+        lines.append("|----|----|-----------|-----------|----------|")
+        for item in prf_detail:
+            hit3_str = "YES" if item["hit_at_3"] else "no"
+            hit5_str = "YES" if item["hit_at_5"] else "no"
+            fb_str = "yes" if item["fallback_fired"] else "-"
+            lines.append(
+                f"| {item['id']} | {item['question_type']} "
+                f"| {hit3_str} | {hit5_str} | {fb_str} |"
+            )
+
+        h(3, "Variants generated per question")
+        for item in prf_detail:
+            lines.append("")
+            lines.append(f"**{item['id']}** (`{item['question_type']}`): "
+                         f"{item['question']}")
+            if item["fallback_fired"]:
+                lines.append("  - *(fallback fired — expansion LLM call failed)*")
+            elif not item["variants"]:
+                lines.append("  - *(no variants returned)*")
+            else:
+                for v in item["variants"]:
+                    lines.append(f"  - {v}")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 # ── Markdown report ────────────────────────────────────────────────────────────
@@ -287,20 +469,20 @@ def _md_report(
         )
 
     # ── By question type ───────────────────────────────────────────────────────
-    h(2, "Retrieval by Question Type (faiss_reranker, answerable only)")
+    h(2, f"Retrieval by Question Type ({_PRIMARY_MODE}, answerable only)")
     lines.append("")
     lines.append("| Question Type | n | R@3 | R@5 | MRR |")
     lines.append("|---------------|---|-----|-----|-----|")
-    for qt, vals in sorted(metrics["faiss_reranker"]["retrieval"]["by_question_type"].items()):
+    for qt, vals in sorted(metrics[_PRIMARY_MODE]["retrieval"]["by_question_type"].items()):
         lines.append(
             f"| {qt} | {vals['n']} | {_pct(vals['recall_at_3'])}"
             f" | {_pct(vals['recall_at_5'])} | {vals['mrr']:.3f} |"
         )
 
     # ── LLM quality ────────────────────────────────────────────────────────────
-    if "llm" in metrics["faiss_reranker"]:
-        llm = metrics["faiss_reranker"]["llm"]
-        h(2, "LLM Answer Quality (faiss_reranker mode)")
+    if "llm" in metrics[_PRIMARY_MODE]:
+        llm = metrics[_PRIMARY_MODE]["llm"]
+        h(2, f"LLM Answer Quality ({_PRIMARY_MODE} mode)")
         lines.append("")
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
@@ -313,10 +495,10 @@ def _md_report(
             lines.append(f"| LLM latency p95 | {_ms(lat['p95'])} |")
 
     # ── Cold vs warm ───────────────────────────────────────────────────────────
-    h(2, "Cold vs Warm Retrieval Latency (faiss_reranker)")
+    h(2, f"Cold vs Warm Retrieval Latency ({_PRIMARY_MODE})")
     lines.append("")
     lines.append(
-        "> **Cold** = first faiss_reranker query per document (may include model-load overhead).  "
+        f"> **Cold** = first {_PRIMARY_MODE} query per document (may include model-load overhead).  "
     )
     lines.append("> **Warm** = all subsequent queries on the same document's FAISS index.")
     lines.append("")
@@ -375,6 +557,8 @@ def main() -> None:
                         help="Run only the first N questions (quick sanity check)")
     parser.add_argument("--llm-delay", type=float, default=7.0, metavar="SEC",
                         help="Seconds to sleep between LLM calls (avoids Groq TPM limit; default: 7)")
+    parser.add_argument("--prf", action="store_true",
+                        help="Add pseudo-relevance-feedback mode (faiss_reranker_prf) and write prf_report.*")
     args = parser.parse_args()
 
     # Resolve all paths relative to repo root when not absolute
@@ -386,6 +570,7 @@ def main() -> None:
     docs_dir = _abs(args.docs)
     out_dir = _abs(args.out)
     run_llm = _GROQ_KEY_PRESENT and not args.no_llm
+    run_prf = args.prf and _GROQ_KEY_PRESENT
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -398,6 +583,7 @@ def main() -> None:
     print(f"Docs : {docs_dir}")
     print(f"Out  : {out_dir}")
     print(f"LLM  : {'ON (Groq)' if run_llm else 'OFF (retrieval only)'}")
+    print(f"PRF  : {'ON (faiss_reranker_prf mode)' if run_prf else 'OFF'}")
     if not _GROQ_KEY_PRESENT and not args.no_llm:
         print("  [GROQ_API_KEY not set — falling back to retrieval-only mode]")
 
@@ -433,15 +619,18 @@ def main() -> None:
     print(f"\nRunning {len(doc_groups)} document(s)...")
     for doc_id, doc_qs in doc_groups.items():
         records, cw = _run_doc(doc_id, doc_qs, doc_pdf_map[doc_id], run_llm,
-                                llm_delay=args.llm_delay)
+                                llm_delay=args.llm_delay, run_prf=run_prf)
         all_records.extend(records)
         all_cold_ms.extend(cw["cold_ms"])
         all_warm_ms.extend(cw["warm_ms"])
 
     # ── aggregate ──────────────────────────────────────────────────────────────
     print("\nAggregating metrics...", flush=True)
-    metrics = _compute_metrics(all_records, run_llm)
-    review = _needs_review(all_records)
+
+    # needs_review uses only the three baseline modes so a PRF hit can't mask a baseline miss
+    baseline_records = [r for r in all_records if r["mode"] in _MODES]
+    metrics = _compute_metrics(baseline_records, run_llm)
+    review = _needs_review(baseline_records)
 
     meta: Dict[str, Any] = {
         "run_date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -451,45 +640,102 @@ def main() -> None:
         "gold_file": str(gold_path.relative_to(_REPO_ROOT)),
     }
 
-    # ── write outputs ──────────────────────────────────────────────────────────
-    json_report = {
-        "meta": meta,
-        "metrics": metrics,
-        "needs_review": review,
-        "records": all_records,
-    }
-    json_path = out_dir / "baseline_report.json"
-    json_path.write_text(
-        json.dumps(json_report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    print(f"JSON -> {json_path}")
+    if run_prf:
+        # ── PRF path: write prf_report.* only, do NOT overwrite baseline_report.* ──
+        prf_metrics = _compute_prf_metrics(all_records)
+        review_ids = [item["id"] for item in review]
+        prf_detail = _prf_detail_for_ids(all_records, review_ids)
 
-    md_path = out_dir / "baseline_report.md"
-    md_path.write_text(
-        _md_report(metrics, review, meta, {"cold_ms": all_cold_ms, "warm_ms": all_warm_ms}),
-        encoding="utf-8",
-    )
-    print(f"MD   -> {md_path}")
+        # baseline_metrics for the side-by-side table uses the primary retrieval mode only
+        baseline_reranker = {
+            "retrieval": metrics[_PRIMARY_MODE]["retrieval"],
+            "latency": metrics[_PRIMARY_MODE]["latency"],
+        }
 
-    # ── console summary ────────────────────────────────────────────────────────
-    print("\n-- Retrieval summary -----------------------------------------")
-    for mode in _MODES:
-        r = metrics[mode]["retrieval"]
-        lat = metrics[mode]["latency"]
-        print(
-            f"  {mode:20s}  R@3={_pct(r['recall_at_3'])}  "
-            f"R@5={_pct(r['recall_at_5'])}  MRR={r['mrr']:.3f}  "
-            f"p50={_ms(lat['p50'])}"
+        prf_json = {
+            "meta": meta,
+            "prf_metrics": prf_metrics,
+            "baseline_faiss_reranker": baseline_reranker,
+            "needs_review_prf_detail": prf_detail,
+            "records": all_records,
+        }
+        json_path = out_dir / "prf_report.json"
+        json_path.write_text(
+            json.dumps(prf_json, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-    if "llm" in metrics["faiss_reranker"]:
-        llm = metrics["faiss_reranker"]["llm"]
-        print("-- LLM quality -----------------------------------------------")
-        print(f"  key_fact_match_rate    {_pct(llm['key_fact_match_rate'])}")
-        print(f"  abstention_accuracy    {_pct(llm['abstention_accuracy'])}")
-        print(f"  false_abstention_rate  {_pct(llm['false_abstention_rate'])}")
-    if review:
-        print(f"\n  WARNING: {len(review)} question(s) zero hits all modes -- check needs_review")
-    print("--------------------------------------------------------------")
+        print(f"JSON -> {json_path}")
+
+        md_path = out_dir / "prf_report.md"
+        md_path.write_text(
+            _md_prf_report(prf_metrics, baseline_reranker, prf_detail, meta),
+            encoding="utf-8",
+        )
+        print(f"MD   -> {md_path}")
+
+        # ── console summary ────────────────────────────────────────────────────
+        pr = prf_metrics["retrieval"]
+        br = baseline_reranker["retrieval"]
+        prf_lat = prf_metrics["latency"]
+        print("\n-- PRF vs baseline (faiss_reranker) --------------------------")
+        print(f"  {'mode':<24s}  R@3       R@5       MRR      p50")
+        print(
+            f"  {_PRIMARY_MODE:<24s}  "
+            f"{_pct(br['recall_at_3']):<9s} {_pct(br['recall_at_5']):<9s} "
+            f"{br['mrr']:.3f}    {_ms(metrics[_PRIMARY_MODE]['latency']['p50'])}"
+        )
+        print(
+            f"  {'faiss_reranker_prf':<24s}  "
+            f"{_pct(pr['recall_at_3']):<9s} {_pct(pr['recall_at_5']):<9s} "
+            f"{pr['mrr']:.3f}    {_ms(prf_lat['p50'])}"
+        )
+        print(f"  PRF fallback fires: {prf_metrics['fallback_count']} / {prf_metrics['n_questions']}")
+        if review:
+            print(f"\n  Baseline needs_review: {len(review)} question(s)")
+            hits3 = sum(1 for d in prf_detail if d["hit_at_3"])
+            hits5 = sum(1 for d in prf_detail if d["hit_at_5"])
+            print(f"  PRF rescued (hit@3): {hits3}/{len(prf_detail)}   (hit@5): {hits5}/{len(prf_detail)}")
+        print("--------------------------------------------------------------")
+
+    else:
+        # ── Baseline path: write baseline_report.* ─────────────────────────────
+        json_report = {
+            "meta": meta,
+            "metrics": metrics,
+            "needs_review": review,
+            "records": all_records,
+        }
+        json_path = out_dir / "baseline_report.json"
+        json_path.write_text(
+            json.dumps(json_report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(f"JSON -> {json_path}")
+
+        md_path = out_dir / "baseline_report.md"
+        md_path.write_text(
+            _md_report(metrics, review, meta, {"cold_ms": all_cold_ms, "warm_ms": all_warm_ms}),
+            encoding="utf-8",
+        )
+        print(f"MD   -> {md_path}")
+
+        # ── console summary ────────────────────────────────────────────────────
+        print("\n-- Retrieval summary -----------------------------------------")
+        for mode in _MODES:
+            r = metrics[mode]["retrieval"]
+            lat = metrics[mode]["latency"]
+            print(
+                f"  {mode:20s}  R@3={_pct(r['recall_at_3'])}  "
+                f"R@5={_pct(r['recall_at_5'])}  MRR={r['mrr']:.3f}  "
+                f"p50={_ms(lat['p50'])}"
+            )
+        if "llm" in metrics[_PRIMARY_MODE]:
+            llm = metrics[_PRIMARY_MODE]["llm"]
+            print("-- LLM quality -----------------------------------------------")
+            print(f"  key_fact_match_rate    {_pct(llm['key_fact_match_rate'])}")
+            print(f"  abstention_accuracy    {_pct(llm['abstention_accuracy'])}")
+            print(f"  false_abstention_rate  {_pct(llm['false_abstention_rate'])}")
+        if review:
+            print(f"\n  WARNING: {len(review)} question(s) zero hits all modes -- check needs_review")
+        print("--------------------------------------------------------------")
 
 
 if __name__ == "__main__":

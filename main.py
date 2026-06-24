@@ -2,10 +2,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict, TypeVar
@@ -111,6 +113,10 @@ DOCUMENT_CACHE_MAX_ITEMS = 8
 DOCUMENT_CACHE_TTL_SECONDS = 3600
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
+RETRIEVAL_MODE = "faiss_reranker"
+HYBRID_E5_K_INITIAL = 30
+HYBRID_BM25_K_INITIAL = 20
+HYBRID_K_FINAL = 5
 LLM_MODEL_NAME = "llama-3.1-8b-instant"
 MAX_CLAIMS_PER_ANSWER = 5
 CLAIM_VERIFICATION_K_FINAL = 3
@@ -127,6 +133,13 @@ class DocumentCacheEntry:
     faiss_index: faiss.IndexFlatL2
     created_at: float
     last_accessed: float
+
+
+@dataclass
+class BM25Index:
+    tokenized_corpus: List[List[str]]
+    document_frequencies: Counter[str]
+    average_document_length: float
 
 
 document_cache: Dict[str, DocumentCacheEntry] = {}
@@ -176,6 +189,25 @@ def get_retrieval_k_final() -> int:
     return _get_int_setting("RETRIEVAL_K_FINAL", RETRIEVAL_K_FINAL, min_value=1)
 
 
+def get_retrieval_mode() -> str:
+    mode = _get_str_setting("RETRIEVAL_MODE", RETRIEVAL_MODE).strip().lower()
+    if mode == "e5":
+        return "faiss_reranker"
+    return mode
+
+
+def get_hybrid_e5_k_initial() -> int:
+    return _get_int_setting("HYBRID_E5_K_INITIAL", HYBRID_E5_K_INITIAL, min_value=1)
+
+
+def get_hybrid_bm25_k_initial() -> int:
+    return _get_int_setting("HYBRID_BM25_K_INITIAL", HYBRID_BM25_K_INITIAL, min_value=1)
+
+
+def get_hybrid_k_final() -> int:
+    return _get_int_setting("HYBRID_K_FINAL", HYBRID_K_FINAL, min_value=1)
+
+
 def get_max_concurrent_questions() -> int:
     return _get_int_setting("MAX_CONCURRENT_QUESTIONS", MAX_CONCURRENT_QUESTIONS, min_value=1)
 
@@ -190,6 +222,43 @@ def get_document_cache_ttl_seconds() -> int:
 
 def get_embedding_model_name() -> str:
     return _get_str_setting("EMBEDDING_MODEL_NAME", EMBEDDING_MODEL_NAME)
+
+
+def uses_e5_embedding_format(model_name: Optional[str] = None) -> bool:
+    """Return True when the selected embedder expects E5 query/passage prefixes."""
+    selected_model = (model_name or get_embedding_model_name()).strip().lower()
+    return (
+        selected_model.startswith("intfloat/e5-")
+        or selected_model.startswith("intfloat/multilingual-e5-")
+        or "/e5-" in selected_model
+        or "/multilingual-e5-" in selected_model
+    )
+
+
+def get_embedding_input_format_version(model_name: Optional[str] = None) -> str:
+    return "e5-query-passage-v1" if uses_e5_embedding_format(model_name) else "raw-v1"
+
+
+def _format_documents_for_embedding(texts: List[str], model_name: Optional[str] = None) -> List[str]:
+    if uses_e5_embedding_format(model_name):
+        return [f"passage: {text}" for text in texts]
+    return texts
+
+
+def _format_query_for_embedding(question: str, model_name: Optional[str] = None) -> str:
+    if uses_e5_embedding_format(model_name):
+        return f"query: {question}"
+    return question
+
+
+def _embedding_cache_namespace() -> str:
+    model_name = get_embedding_model_name().strip()
+    payload = {
+        "embedding_model": model_name,
+        "input_format": get_embedding_input_format_version(model_name),
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"embedding:{digest[:16]}"
 
 
 def get_reranker_model_name() -> str:
@@ -469,11 +538,13 @@ def _parse_claim_verification_output(
 
 
 def _url_cache_key(url: str) -> str:
-    return f"url:{hashlib.sha256(url.encode('utf-8')).hexdigest()}"
+    url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return f"url:{_embedding_cache_namespace()}:{url_hash}"
 
 
 def _upload_cache_key(pdf_bytes: bytes) -> str:
-    return f"upload:{hashlib.sha256(pdf_bytes).hexdigest()}"
+    pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    return f"upload:{_embedding_cache_namespace()}:{pdf_hash}"
 
 
 def _is_supported_pdf_upload(file: UploadFile) -> bool:
@@ -643,12 +714,160 @@ def create_vector_store(
         raise HTTPException(status_code=400, detail="No text chunks to process.")
 
     logger.info("Creating embeddings and building FAISS index...")
-    chunk_embeddings = embedding_model.embed_documents([chunk["text"] for chunk in chunks])
+    model_name = get_embedding_model_name()
+    chunk_texts = _format_documents_for_embedding([chunk["text"] for chunk in chunks], model_name)
+    chunk_embeddings = embedding_model.embed_documents(chunk_texts)
     embedding_array = np.array(chunk_embeddings, dtype="float32")
     index = faiss.IndexFlatL2(embedding_array.shape[1])
     index.add(embedding_array)
     logger.info("FAISS index created with %s vectors.", index.ntotal)
     return index
+
+
+def _build_context(selected_chunks: List[ChunkRecord]) -> str:
+    return "\n\n".join(
+        f"[Page {chunk['page']} | Chunk {chunk['chunk_id']}]\n{chunk['text']}"
+        for chunk in selected_chunks
+    )
+
+
+def _bm25_tokenize(text: str) -> List[str]:
+    return text.lower().split()
+
+
+def _bm25_cache_key(chunks: List[ChunkRecord]) -> str:
+    return f"bm25:{id(chunks)}:{len(chunks)}"
+
+
+def _get_bm25_index(chunks: List[ChunkRecord]) -> BM25Index:
+    cache_key = _bm25_cache_key(chunks)
+    cached_index = model_cache.get(cache_key)
+    if isinstance(cached_index, BM25Index):
+        return cached_index
+
+    tokenized_corpus = [_bm25_tokenize(chunk["text"]) for chunk in chunks]
+    document_frequencies: Counter[str] = Counter()
+    for tokens in tokenized_corpus:
+        document_frequencies.update(set(tokens))
+
+    average_document_length = (
+        sum(len(tokens) for tokens in tokenized_corpus) / len(tokenized_corpus)
+        if tokenized_corpus
+        else 0.0
+    )
+    bm25_index = BM25Index(
+        tokenized_corpus=tokenized_corpus,
+        document_frequencies=document_frequencies,
+        average_document_length=average_document_length,
+    )
+    model_cache[cache_key] = bm25_index
+    return bm25_index
+
+
+def _bm25_rank_chunks(question: str, chunks: List[ChunkRecord], k: int) -> List[Tuple[int, float]]:
+    bm25_index = _get_bm25_index(chunks)
+    query_terms = _bm25_tokenize(question)
+    if not query_terms or not bm25_index.tokenized_corpus:
+        return []
+
+    document_count = len(bm25_index.tokenized_corpus)
+    k1 = 1.5
+    b = 0.75
+    scores: List[Tuple[int, float]] = []
+    for index, tokens in enumerate(bm25_index.tokenized_corpus):
+        term_frequencies = Counter(tokens)
+        document_length = len(tokens)
+        score = 0.0
+        for term in query_terms:
+            term_frequency = term_frequencies.get(term, 0)
+            if term_frequency == 0:
+                continue
+            document_frequency = bm25_index.document_frequencies.get(term, 0)
+            idf = math.log(1 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
+            denominator = term_frequency + k1 * (
+                1 - b + b * document_length / bm25_index.average_document_length
+            )
+            score += idf * (term_frequency * (k1 + 1)) / denominator
+        scores.append((index, score))
+
+    return sorted(scores, key=lambda item: item[1], reverse=True)[:k]
+
+
+def _copy_chunk_with_retrieval_metadata(
+    chunk: ChunkRecord,
+    *,
+    source: str,
+    e5_rank: Optional[int] = None,
+    bm25_rank: Optional[int] = None,
+) -> ChunkRecord:
+    enriched_chunk = dict(chunk)
+    enriched_chunk["retrieval_sources"] = [source]
+    if e5_rank is not None:
+        enriched_chunk["e5_rank"] = e5_rank
+    if bm25_rank is not None:
+        enriched_chunk["bm25_rank"] = bm25_rank
+    return enriched_chunk  # type: ignore[return-value]
+
+
+def retrieve_hybrid_context(
+    question: str,
+    faiss_index: faiss.IndexFlatL2,
+    chunks: List[ChunkRecord],
+    embedding_model: Any,
+    reranker: Any,
+) -> Tuple[str, List[ChunkRecord]]:
+    e5_k = get_hybrid_e5_k_initial()
+    bm25_k = get_hybrid_bm25_k_initial()
+    final_k = get_hybrid_k_final()
+
+    model_name = get_embedding_model_name()
+    formatted_question = _format_query_for_embedding(question, model_name)
+    question_embedding = np.array([embedding_model.embed_query(formatted_question)], dtype="float32")
+    _, indices = faiss_index.search(question_embedding, e5_k)
+
+    merged_by_chunk_id: Dict[int, ChunkRecord] = {}
+    for rank, index in enumerate((idx for idx in indices[0] if idx != -1), start=1):
+        chunk = chunks[index]
+        merged_by_chunk_id[chunk["chunk_id"]] = _copy_chunk_with_retrieval_metadata(
+            chunk,
+            source="e5",
+            e5_rank=rank,
+        )
+
+    for rank, (index, _score) in enumerate(_bm25_rank_chunks(question, chunks, bm25_k), start=1):
+        chunk = chunks[index]
+        existing_chunk = merged_by_chunk_id.get(chunk["chunk_id"])
+        if existing_chunk is None:
+            merged_by_chunk_id[chunk["chunk_id"]] = _copy_chunk_with_retrieval_metadata(
+                chunk,
+                source="bm25",
+                bm25_rank=rank,
+            )
+        else:
+            sources = existing_chunk.setdefault("retrieval_sources", [])  # type: ignore[attr-defined]
+            if "bm25" not in sources:
+                sources.append("bm25")
+            existing_chunk["bm25_rank"] = rank  # type: ignore[typeddict-unknown-key]
+
+    retrieved_chunks = list(merged_by_chunk_id.values())
+    if not retrieved_chunks:
+        logger.info("No hybrid retrieved chunks for question: %r", question)
+        return "", []
+
+    rerank_pairs = [[question, chunk["text"]] for chunk in retrieved_chunks]
+    rerank_scores = reranker.predict(rerank_pairs)
+    reranked = sorted(zip(retrieved_chunks, rerank_scores), key=lambda item: item[1], reverse=True)
+    selected_chunks: List[ChunkRecord] = []
+    for chunk, score in reranked[:final_k]:
+        chunk["reranker_score"] = float(score)  # type: ignore[typeddict-unknown-key]
+        selected_chunks.append(chunk)
+
+    logger.info(
+        "Hybrid retrieved chunk_ids for question %r: %s",
+        question,
+        [chunk["chunk_id"] for chunk in selected_chunks],
+    )
+    return _build_context(selected_chunks), selected_chunks
 
 
 def retrieve_context(
@@ -667,7 +886,12 @@ def retrieve_context(
     if k_final is None:
         k_final = get_retrieval_k_final()
 
-    question_embedding = np.array([embedding_model.embed_query(question)], dtype="float32")
+    if get_retrieval_mode() == "e5_bm25_reranker" and use_reranker:
+        return retrieve_hybrid_context(question, faiss_index, chunks, embedding_model, reranker)
+
+    model_name = get_embedding_model_name()
+    formatted_question = _format_query_for_embedding(question, model_name)
+    question_embedding = np.array([embedding_model.embed_query(formatted_question)], dtype="float32")
     _, indices = faiss_index.search(question_embedding, k_initial)
 
     valid_indices = [index for index in indices[0] if index != -1]
@@ -690,11 +914,7 @@ def retrieve_context(
         [chunk["chunk_id"] for chunk in selected_chunks],
     )
 
-    context = "\n\n".join(
-        f"[Page {chunk['page']} | Chunk {chunk['chunk_id']}]\n{chunk['text']}"
-        for chunk in selected_chunks
-    )
-    return context, selected_chunks
+    return _build_context(selected_chunks), selected_chunks
 
 
 def generate_answer(question: str, context: str, client: Groq) -> str:
