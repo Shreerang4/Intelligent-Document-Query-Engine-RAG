@@ -21,12 +21,18 @@ This document summarizes the completed retrieval-quality stage for the Intellige
 
 ## Decision
 
-E5-small-v2 is the best current retrieval-quality candidate. It improves R@5 from 62.5% to 70.8%, improves MRR, and reduces needs_review from 7 to 4. It should remain configurable rather than becoming the default automatically, because CPU ingestion is slower than MiniLM and remaining misses need targeted work.
+E5-small-v2 is the current default embedder in the GitHub repo. It improves R@5 from 62.5% to 70.8%, improves MRR, and reduces needs_review from 7 to 4. CPU ingestion is slower than MiniLM, so MiniLM remains available as a fallback/baseline for speed or cost-sensitive runs.
 
-MiniLM remains the default production embedder for speed and cost. E5-small-v2 is available through:
+Default E5 run:
 
 ```powershell
 $env:EMBEDDING_MODEL_NAME='intfloat/e5-small-v2'
+```
+
+MiniLM fallback/baseline:
+
+```powershell
+$env:EMBEDDING_MODEL_NAME='all-MiniLM-L6-v2'
 ```
 
 The E5+BM25 hybrid is documented as an ablation, not as the default. It rescued one exact-table case but introduced a new regression and increased retrieval latency substantially.
@@ -86,4 +92,6 @@ This was one of the E5 rescues. Hybrid reranking changed the merged candidate or
 
 ## Recommendation
 
-Keep E5-small-v2 as the best evaluated retrieval candidate and keep MiniLM as the current default. Keep E5+BM25 hybrid as an ablation until there is a better merge/rerank strategy that improves q08 without losing E5 semantic rescues or adding unacceptable latency.
+Use E5-small-v2 as the default retrieval embedder in the GitHub repo, while keeping MiniLM configurable as the fallback/baseline. Keep E5+BM25 hybrid as an ablation until there is a better merge/rerank strategy that improves q08 without losing E5 semantic rescues or adding unacceptable latency.
+
+The Hugging Face live demo may lag behind this GitHub repo until the Space is manually synced.

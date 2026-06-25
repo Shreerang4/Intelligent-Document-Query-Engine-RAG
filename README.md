@@ -8,7 +8,7 @@ GitHub repo: https://github.com/Shreerang4/Intelligent-Document-Query-Engine-RAG
 
 Intelligent Document Query Engine is a full-stack PDF RAG application with an evaluated retrieval pipeline. It combines a React/Vite frontend with a FastAPI backend that ingests PDFs from a URL or upload, chunks extracted text, retrieves relevant evidence, reranks it, and asks Groq to generate source-grounded answers with page/chunk citations and claim verification.
 
-The current production default remains MiniLM for cost and speed. E5-small-v2 is integrated behind configuration and is the best evaluated retrieval-quality candidate so far.
+The GitHub repo now defaults to E5-small-v2 for retrieval quality. MiniLM remains selectable through `EMBEDDING_MODEL_NAME` for speed/cost comparison, and the Hugging Face live demo may lag behind this repo until the Space is manually synced.
 
 ## Features
 
@@ -17,8 +17,8 @@ The current production default remains MiniLM for cost and speed. E5-small-v2 is
 - PDF validation, download/upload handling, and PyMuPDF text extraction.
 - Page-aware chunking with 500-character chunks and 50-character overlap.
 - Configurable embeddings through `EMBEDDING_MODEL_NAME`.
-- MiniLM baseline/default: `all-MiniLM-L6-v2`.
-- E5-small-v2 candidate: `intfloat/e5-small-v2` with correct `passage:` and `query:` prefixes.
+- E5-small-v2 default: `intfloat/e5-small-v2` with correct `passage:` and `query:` prefixes.
+- MiniLM fallback/baseline: `all-MiniLM-L6-v2`.
 - In-memory FAISS vector search and embedding-aware document cache keys.
 - BM25 and E5+BM25 hybrid retrieval experiments behind `RETRIEVAL_MODE`.
 - CrossEncoder reranking, defaulting to `cross-encoder/ms-marco-TinyBERT-L-2-v2`.
@@ -97,7 +97,7 @@ Backend variables referenced by the code:
 | `MAX_CONCURRENT_QUESTIONS` | No | `4` | Concurrent question processing limit. |
 | `DOCUMENT_CACHE_MAX_ITEMS` | No | `8` | Maximum number of cached document indexes. |
 | `DOCUMENT_CACHE_TTL_SECONDS` | No | `3600` | Document cache TTL in seconds. |
-| `EMBEDDING_MODEL_NAME` | No | `all-MiniLM-L6-v2` | Hugging Face embedding model name. Set `intfloat/e5-small-v2` to test E5. |
+| `EMBEDDING_MODEL_NAME` | No | `intfloat/e5-small-v2` | Hugging Face embedding model name. Set `all-MiniLM-L6-v2` to use the MiniLM fallback/baseline. |
 | `RERANKER_MODEL_NAME` | No | `cross-encoder/ms-marco-TinyBERT-L-2-v2` | CrossEncoder reranker model name. |
 | `LLM_MODEL_NAME` | No | `llama-3.1-8b-instant` | Groq model name. |
 
@@ -180,6 +180,7 @@ For Hugging Face Spaces:
 - Configure `GROQ_API_KEY` and `API_TOKEN` as Space secrets.
 - Keep `app_port: 7860` in the README front matter.
 - The built React frontend is served by FastAPI from the same origin.
+- This GitHub repo may be ahead of the live Hugging Face Space when the Space has not been manually synced.
 
 ## API Endpoints
 
