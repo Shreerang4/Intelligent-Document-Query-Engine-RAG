@@ -23,6 +23,17 @@ This document summarizes the completed retrieval-quality stage for the Intellige
 
 E5-small-v2 is the current default embedder in the GitHub repo. It improves R@5 from 62.5% to 70.8%, improves MRR, and reduces needs_review from 7 to 4. CPU ingestion is slower than MiniLM, so MiniLM remains available as a fallback/baseline for speed or cost-sensitive runs.
 
+## Final Shipped Configuration
+
+- Embedder: `intfloat/e5-small-v2` by default.
+- MiniLM fallback: `all-MiniLM-L6-v2` via `EMBEDDING_MODEL_NAME`.
+- Retrieval mode: `faiss_reranker`.
+- Initial FAISS candidates: `k_initial=20`.
+- Final reranked chunks: `k_final=8`.
+- Reranker: `cross-encoder/ms-marco-TinyBERT-L-2-v2`.
+
+The eval harness and production pipeline now use the same `k_final=8`, so the benchmark measures the shipped final-context configuration.
+
 Default E5 run:
 
 ```powershell

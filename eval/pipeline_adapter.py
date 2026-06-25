@@ -47,11 +47,11 @@ def query(
     use_reranker: bool = True,
     run_llm: bool = True,
     k_initial: int = 20,
-    k_final: int = 10,
+    k_final: int = 8,
 ) -> Dict:
     """Run retrieval (and optionally LLM generation) for one question.
 
-    k_initial=20, k_final=10 gives enough candidates to compute Recall@3/5
+    k_initial=20, k_final=8 gives enough candidates to compute Recall@3/5
     and rank-based MRR in the eval harness.
 
     Returns a dict with:

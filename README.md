@@ -88,8 +88,8 @@ Backend variables referenced by the code:
 | `PORT` | No | `7860` | Uvicorn port used by `start.py`. |
 | `MAX_PDF_BYTES` | No | `15728640` | Maximum PDF size in bytes. |
 | `HTTP_TIMEOUT_SECONDS` | No | `30` | Timeout for PDF URL downloads. |
-| `RETRIEVAL_K_INITIAL` | No | `8` | Initial FAISS retrieval count before reranking in the app path. |
-| `RETRIEVAL_K_FINAL` | No | `3` | Final chunk count after reranking in the app path. |
+| `RETRIEVAL_K_INITIAL` | No | `20` | Initial FAISS retrieval count before reranking in the app path. |
+| `RETRIEVAL_K_FINAL` | No | `8` | Final chunk count after reranking in the app path. |
 | `RETRIEVAL_MODE` | No | `faiss_reranker` | Retrieval path. Experimental option: `e5_bm25_reranker`. |
 | `HYBRID_E5_K_INITIAL` | No | `30` | E5 candidate count for the hybrid experiment. |
 | `HYBRID_BM25_K_INITIAL` | No | `20` | BM25 candidate count for the hybrid experiment. |
