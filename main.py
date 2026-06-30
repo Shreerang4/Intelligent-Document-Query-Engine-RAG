@@ -1642,6 +1642,32 @@ async def list_history_query_citations(
         raise HTTPException(status_code=503, detail="History is unavailable.") from exc
 
 
+@app.get("/health/db")
+async def database_health_check(authorization: Optional[str] = Header(None)) -> Dict[str, object]:
+    _require_bearer_token(authorization)
+
+    try:
+        from sqlalchemy import select, text
+
+        from persistence.db import SessionLocal
+        from persistence.models import User
+        from persistence.user_context import get_current_user_id
+
+        with SessionLocal() as session:
+            session.execute(text("SELECT 1"))
+            user_seeded = (
+                session.execute(select(User.id).where(User.id == get_current_user_id())).scalar_one_or_none()
+                is not None
+            )
+
+        return {"database": "ok", "user_seeded": user_seeded}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Database health check failed safely: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Database health check failed.") from exc
+
+
 @app.get("/health")
 async def health_check() -> Dict[str, object]:
     _evict_expired_document_cache_entries()

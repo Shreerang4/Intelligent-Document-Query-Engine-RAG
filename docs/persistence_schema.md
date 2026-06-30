@@ -14,6 +14,21 @@ Managed MySQL requires TLS. Set `DB_CA_CERT` to the local CA certificate path so
 SQLAlchemy/PyMySQL can connect with certificate verification enabled. The CA
 certificate file is local deployment material and must not be committed.
 
+For Hugging Face Docker Space deployment, do not commit the CA certificate.
+Encode the CA certificate locally and store the base64 string as the
+`DB_CA_CERT_B64` Space secret. On startup, the app decodes that secret into a
+temporary CA file and uses it for SQLAlchemy SSL verification.
+
+Required Hugging Face Space secrets for the deployed app are:
+
+- `DATABASE_URL`
+- `DB_CA_CERT_B64`
+- `GROQ_API_KEY`
+- `API_TOKEN`
+
+Deployment to the Hugging Face Space is manual through the `hf` git remote;
+there is no GitHub auto-sync workflow in this repo.
+
 SQLite is only the local/development fallback for smoke testing and quick schema
 checks. If `DATABASE_URL` is not set, the persistence layer defaults to
 `sqlite:///./rag_persistence.db`.
