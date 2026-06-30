@@ -6,13 +6,14 @@ GitHub repo: https://github.com/Shreerang4/Intelligent-Document-Query-Engine-RAG
 
 ## Overview
 
-Intelligent Document Query Engine is a full-stack PDF RAG application with an evaluated retrieval pipeline. It combines a React/Vite frontend with a FastAPI backend that ingests PDFs from a URL or upload, chunks extracted text, retrieves relevant evidence, reranks it, and asks Groq to generate source-grounded answers with page/chunk citations and claim verification.
+Intelligent Document Query Engine is a full-stack PDF RAG application with an evaluated retrieval pipeline and persistent document/query history. It combines a React/Vite frontend with a FastAPI backend that ingests PDFs from a URL or upload, chunks extracted text, retrieves relevant evidence, reranks it, asks Groq to generate source-grounded answers with page/chunk citations and claim verification, and stores history in managed MySQL.
 
-The GitHub repo now defaults to E5-small-v2 for retrieval quality. MiniLM remains selectable through `EMBEDDING_MODEL_NAME` for speed/cost comparison, and the Hugging Face live demo may lag behind this repo until the Space is manually synced.
+The Hugging Face live demo is updated with persistence enabled. The app defaults to E5-small-v2 for retrieval quality. MiniLM remains selectable through `EMBEDDING_MODEL_NAME` for fallback/baseline comparison.
 
 ## Features
 
 - React/Vite UI for PDF URL ingestion and PDF upload.
+- Persistent document and query history backed by managed MySQL/Aiven.
 - FastAPI API with bearer-token protection for query endpoints.
 - PDF validation, download/upload handling, and PyMuPDF text extraction.
 - Page-aware chunking with 500-character chunks and 50-character overlap.
@@ -25,11 +26,12 @@ The GitHub repo now defaults to E5-small-v2 for retrieval quality. MiniLM remain
 - Groq LLM answer generation, defaulting to `llama-3.1-8b-instant`.
 - Source-grounded responses with page number, chunk id, and excerpts.
 - Claim extraction and verification against retrieved evidence.
+- Persistence-ready user ownership columns using the current `local-dev-user` placeholder until OAuth is added.
 - Retrieval evaluation harness with benchmark reports and targeted probes.
 
 ## Architecture
 
-`React UI -> FastAPI API -> PDF upload/URL ingestion -> PyMuPDF extraction -> chunking -> configurable embeddings -> FAISS/BM25 retrieval experiments -> CrossEncoder reranking -> Groq LLM -> source-grounded answers + claim verification`
+`React UI -> FastAPI API -> PDF upload/URL ingestion -> PyMuPDF extraction -> chunking -> configurable embeddings -> FAISS/BM25 retrieval experiments -> CrossEncoder reranking -> Groq LLM -> source-grounded answers + claim verification -> MySQL history persistence`
 
 ```mermaid
 flowchart LR
@@ -48,6 +50,7 @@ flowchart LR
     K --> L[Groq LLM answer generation]
     L --> M[Claim verification]
     M --> N[Source-grounded answer with excerpts]
+    N --> O[MySQL history tables]
 ```
 
 ## Retrieval Evaluation
@@ -83,8 +86,11 @@ Backend variables referenced by the code:
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `API_TOKEN` | Yes | none | Bearer token required by `/hackrx/run` and `/hackrx/upload-run`. |
+| `API_TOKEN` | Yes | none | Bearer token required by query, history, and database health endpoints. |
 | `GROQ_API_KEY` | Yes | none | Used by the Groq SDK for answer generation and claim verification. |
+| `DATABASE_URL` | Production | `sqlite:///./rag_persistence.db` | SQLAlchemy database URL for persisted users, documents, chunks, queries, and citations. Production uses managed MySQL/Aiven. |
+| `DB_CA_CERT` | Local MySQL | none | Local path to the MySQL CA certificate for TLS verification. Do not commit this file. |
+| `DB_CA_CERT_B64` | HF MySQL | none | Base64-encoded CA certificate secret decoded at startup for Hugging Face deployment. |
 | `PORT` | No | `7860` | Uvicorn port used by `start.py`. |
 | `MAX_PDF_BYTES` | No | `15728640` | Maximum PDF size in bytes. |
 | `HTTP_TIMEOUT_SECONDS` | No | `30` | Timeout for PDF URL downloads. |
@@ -119,6 +125,8 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 $env:GROQ_API_KEY="your_groq_api_key"
 $env:API_TOKEN="your_local_api_token"
+$env:DATABASE_URL="mysql+pymysql://..."
+$env:DB_CA_CERT="certs/ca.pem"
 $env:PORT="7860"
 py start.py
 ```
@@ -171,16 +179,20 @@ docker build -t intelligent-document-query-engine .
 docker run --rm -p 7860:7860 `
   --env GROQ_API_KEY=your_groq_api_key `
   --env API_TOKEN=your_api_token `
+  --env DATABASE_URL=your_database_url `
+  --env DB_CA_CERT=/path/to/ca.pem `
   intelligent-document-query-engine
 ```
 
 For Hugging Face Spaces:
 
 - Use the Docker SDK.
-- Configure `GROQ_API_KEY` and `API_TOKEN` as Space secrets.
+- Configure `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, and `API_TOKEN` as Space secrets.
+- Store the MySQL/Aiven CA certificate as `DB_CA_CERT_B64`; do not commit `certs/*.pem`.
 - Keep `app_port: 7860` in the README front matter.
 - The built React frontend is served by FastAPI from the same origin.
-- This GitHub repo may be ahead of the live Hugging Face Space when the Space has not been manually synced.
+- The live Hugging Face Space at https://shreerangss-intelligent-document-query-engine.hf.space/ is manually deployed and currently includes persistence.
+- OAuth is not implemented yet. All persisted records currently use the stable `local-dev-user` placeholder until OAuth replaces `get_current_user_id()`.
 
 ## API Endpoints
 
@@ -226,11 +238,28 @@ Multipart form fields:
 
 Returns service status, app version, cache entry count, and whether the embedding model, reranker, and Groq client have been loaded.
 
+### `GET /health/db`
+
+Protected by `Authorization: Bearer <API_TOKEN>`. Runs a safe database connectivity check and verifies the seeded `local-dev-user` exists. The response does not expose database host, credentials, certificate paths, or certificate contents.
+
+### `GET /history/documents`
+
+Protected by `Authorization: Bearer <API_TOKEN>`. Returns persisted documents for the current placeholder user, including chunk and query counts.
+
+### `GET /history/documents/{document_id}/queries`
+
+Protected by `Authorization: Bearer <API_TOKEN>`. Returns persisted questions, answers, abstention status, and latency for one document owned by the current placeholder user.
+
+### `GET /history/queries/{query_id}/citations`
+
+Protected by `Authorization: Bearer <API_TOKEN>`. Returns persisted source citations for one stored query.
+
 ## Security Notes
 
 - Do not commit `.env`, `.env.local`, or real API keys.
-- Store `GROQ_API_KEY` and `API_TOKEN` as Hugging Face Space secrets in production.
-- Query endpoints require `Authorization: Bearer <API_TOKEN>`.
+- Do not commit database credentials or CA certificates.
+- Store `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, and `API_TOKEN` as Hugging Face Space secrets in production.
+- Query, history, and database health endpoints require `Authorization: Bearer <API_TOKEN>`.
 - Document indexes and model clients are process-local and in memory.
 - URL ingestion downloads caller-provided PDFs, so deployment environments should consider network egress and SSRF risk policies.
 
@@ -239,7 +268,7 @@ Returns service status, app version, cache entry count, and whether the embeddin
 - Cache is process-local memory and is cleared on container restart.
 - PDF extraction depends on embedded text; scanned/image-only PDFs are not OCR-processed.
 - FAISS indexes are rebuilt per uncached document and are not persisted to disk.
-- There is no user account system or per-user document isolation in the current code.
+- OAuth is not implemented yet. The database schema has `user_id` columns and all current requests use the single `local-dev-user` placeholder.
 - The frontend uses a manually entered bearer token rather than an authenticated session flow.
 - Retrieval quality is improved but not perfect; remaining misses are documented in the benchmark summary.
 

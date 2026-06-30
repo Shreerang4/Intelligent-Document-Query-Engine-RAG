@@ -1,14 +1,16 @@
 # Persistence Schema
 
-This document describes the first persistence slice for the RAG backend. The
-schema exists independently of the live FastAPI pipeline: ingestion, retrieval,
-answer generation, and citation generation are not writing to these tables yet.
+This document describes the deployed persistence schema for the RAG backend.
+The live FastAPI pipeline now writes ingested documents, page-aware chunks,
+query answers, claim-verification payloads, and source citations to these
+tables. The production Hugging Face Space uses this schema through managed
+MySQL/Aiven.
 
 ## Database Target
 
-Intended production persistence uses a managed MySQL database supplied through
-the `DATABASE_URL` environment variable, for example with a
-`mysql+pymysql://...` SQLAlchemy URL.
+Production persistence uses a managed MySQL database supplied through the
+`DATABASE_URL` environment variable, for example with a `mysql+pymysql://...`
+SQLAlchemy URL.
 
 Managed MySQL requires TLS. Set `DB_CA_CERT` to the local CA certificate path so
 SQLAlchemy/PyMySQL can connect with certificate verification enabled. The CA
@@ -27,7 +29,9 @@ Required Hugging Face Space secrets for the deployed app are:
 - `API_TOKEN`
 
 Deployment to the Hugging Face Space is manual through the `hf` git remote;
-there is no GitHub auto-sync workflow in this repo.
+there is no GitHub auto-sync workflow in this repo. The production Space is
+deployed with persistence enabled, and staging remains available separately as a
+rollback target.
 
 SQLite is only the local/development fallback for smoke testing and quick schema
 checks. If `DATABASE_URL` is not set, the persistence layer defaults to
@@ -40,19 +44,21 @@ because it can contain database credentials.
 ## User Identity
 
 The schema includes `user_id` on every user-owned table before OAuth exists. For
-local development, `persistence.user_context.get_current_user_id()` returns the
-stable placeholder `local-dev-user`.
+the current deployed app, `persistence.user_context.get_current_user_id()`
+returns the stable placeholder `local-dev-user`.
 
-Adding `user_id` now prevents a later migration where historical documents,
-chunks, queries, and citations would need to be backfilled or repartitioned by
-owner. When OAuth is added, it should replace only `get_current_user_id()` with a
-real authenticated identity lookup; the schema stays unchanged.
+Adding `user_id` from day one prevents a later migration where historical
+documents, chunks, queries, and citations would need to be backfilled or
+repartitioned by owner. When OAuth is added, it should replace only
+`get_current_user_id()` with a real authenticated identity lookup; the schema
+stays unchanged.
 
 ## Why Eval Tables Are Excluded
 
 Evaluation reports, benchmark questions, metrics, and experiment artifacts are
-not part of the application persistence model. They remain file-based under
-`eval/` and generated reports remain ignored under `eval/results/`.
+not part of the application persistence model and are intentionally not stored
+in MySQL. They remain file-based under `eval/` and generated reports remain
+ignored under `eval/results/`.
 
 Keeping eval data out of this schema avoids mixing production user history with
 benchmark-only records and keeps this slice focused on app-level document and
@@ -60,8 +66,9 @@ query history.
 
 ## Why Embeddings And FAISS Blobs Are Excluded
 
-This slice stores source text and retrieval metadata, not vector artifacts.
-Embeddings and FAISS indexes are intentionally excluded because:
+The persistence layer stores source text and retrieval metadata, not vector
+artifacts. Embeddings and FAISS indexes are intentionally excluded from MySQL
+because:
 
 - they can be regenerated from chunks and the recorded embedding config,
 - they are large compared with the relational metadata,
