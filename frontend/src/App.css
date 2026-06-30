@@ -42,6 +42,16 @@
   margin-bottom: 20px;
 }
 
+.view-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 6px;
+  margin-bottom: 20px;
+  border-radius: 16px;
+  background: var(--accent-soft);
+}
+
 .panel {
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
@@ -90,6 +100,7 @@
 }
 
 .mode-button,
+.view-button,
 .primary-button,
 .secondary-button,
 .ghost-button {
@@ -107,7 +118,15 @@
   font-weight: 700;
 }
 
-.mode-button.is-active {
+.view-button {
+  padding: 12px 18px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.mode-button.is-active,
+.view-button.is-active {
   background: var(--panel-bg);
   color: var(--text-color);
   box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
@@ -196,7 +215,8 @@
 .primary-button:hover,
 .secondary-button:hover,
 .ghost-button:hover,
-.mode-button:hover {
+.mode-button:hover,
+.view-button:hover {
   transform: translateY(-1px);
 }
 
@@ -322,6 +342,85 @@
 .results-panel {
   display: grid;
   gap: 18px;
+}
+
+.history-panel,
+.history-list {
+  display: grid;
+  gap: 16px;
+}
+
+.history-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.history-context {
+  padding: 16px;
+  border: 1px solid rgba(21, 79, 141, 0.12);
+  border-radius: 18px;
+  background: var(--accent-soft);
+}
+
+.history-context h3,
+.history-context p {
+  margin: 6px 0 0;
+}
+
+.history-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  width: 100%;
+  padding: 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--text-color);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.history-row:hover {
+  border-color: rgba(21, 79, 141, 0.32);
+  transform: translateY(-1px);
+}
+
+.history-meta {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.history-counts {
+  min-width: 110px;
+  color: var(--muted-strong);
+  font-size: 0.92rem;
+  font-weight: 700;
+  text-align: right;
+}
+
+.history-query {
+  padding: 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.history-query-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.history-query h3,
+.history-query p {
+  margin: 6px 0 0;
 }
 
 .loading-box,
@@ -470,6 +569,7 @@
 
   .panel-header,
   .answer-header,
+  .history-query-header,
   .source-header,
   .claim-card-header,
   .claim-sources-header,
@@ -486,5 +586,17 @@
 
   .actions {
     display: grid;
+  }
+
+  .view-switch {
+    width: 100%;
+  }
+
+  .history-row {
+    flex-direction: column;
+  }
+
+  .history-counts {
+    text-align: left;
   }
 }

@@ -2,6 +2,7 @@
 .env.local
 *.env
 !.env.example
+certs/*.pem
 
 __pycache__/
 *.pyc
