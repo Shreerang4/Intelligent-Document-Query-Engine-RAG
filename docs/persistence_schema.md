@@ -55,6 +55,19 @@ Embeddings and FAISS indexes are intentionally excluded because:
 
 Future persistence can add a dedicated vector store or artifact cache if needed.
 
+## Dedup Behavior
+
+Document deduplication uses `(user_id, source_hash)`, but `source_hash` is
+computed differently by ingestion path:
+
+- Upload ingestion uses the SHA-256 hash of the uploaded PDF bytes.
+- URL ingestion uses a hash of the existing document cache key, because the URL
+  loader does not retain raw PDF bytes after chunking.
+
+Known limitation: the same PDF ingested once by upload and once by URL will not
+deduplicate across those paths because the two source hashes differ. This is an
+accepted tradeoff for now to avoid refactoring the URL loader and cache flow.
+
 ## Tables
 
 ### `users`

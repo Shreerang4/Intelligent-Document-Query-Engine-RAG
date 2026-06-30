@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from groq import Groq
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field, HttpUrl
+from persistence.ingestion import persist_ingested_document_best_effort
 
 if TYPE_CHECKING:
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -1289,11 +1290,24 @@ async def run_query_pipeline(
     reranker = get_reranker_model()
     groq_client = get_groq_client()
 
+    cache_key = _url_cache_key(url)
     chunks, faiss_index = await _get_cached_document(
-        _url_cache_key(url),
+        cache_key,
         response,
         lambda: load_and_chunk_pdf(url),
         embedding_model,
+    )
+    persist_ingested_document_best_effort(
+        source_type="url",
+        source_url=url,
+        cache_key=cache_key,
+        chunks=chunks,
+        embedding_model=get_embedding_model_name(),
+        embedding_format=get_embedding_input_format_version(),
+        retrieval_mode=get_retrieval_mode(),
+        reranker_model=get_reranker_model_name(),
+        k_initial=get_retrieval_k_initial(),
+        k_final=get_retrieval_k_final(),
     )
 
     return await _run_questions(
@@ -1348,6 +1362,20 @@ async def upload_query_pipeline(
         _set_document_cache_entry(cache_key, chunks, faiss_index, now=current_time)
         _set_cache_headers(response, "MISS")
         logger.info("Document cached for upload input.")
+
+    persist_ingested_document_best_effort(
+        source_type="upload",
+        filename=file.filename,
+        pdf_bytes=pdf_bytes,
+        cache_key=cache_key,
+        chunks=chunks,
+        embedding_model=get_embedding_model_name(),
+        embedding_format=get_embedding_input_format_version(),
+        retrieval_mode=get_retrieval_mode(),
+        reranker_model=get_reranker_model_name(),
+        k_initial=get_retrieval_k_initial(),
+        k_final=get_retrieval_k_final(),
+    )
 
     reranker = get_reranker_model()
     groq_client = get_groq_client()
