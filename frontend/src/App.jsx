@@ -13,6 +13,11 @@ const MODE_OPTIONS = [
   { value: 'upload', label: 'Upload PDF' },
 ];
 
+const VIEW_OPTIONS = [
+  { value: 'query', label: 'Query' },
+  { value: 'history', label: 'History' },
+];
+
 const ANSWER_STATUS_LABELS = {
   ok: 'OK',
   no_context: 'No Context',
@@ -98,8 +103,26 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function formatDateTime(value) {
+  if (!value) {
+    return 'Unknown date';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown date';
+  }
+
+  return date.toLocaleString();
+}
+
+function formatDocumentTitle(document) {
+  return document.filename || document.source_url || `Document ${document.id.slice(0, 8)}`;
+}
+
 function App() {
   const fileInputRef = useRef(null);
+  const [activeView, setActiveView] = useState('query');
   const [mode, setMode] = useState('url');
   const [documentUrl, setDocumentUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
@@ -111,6 +134,11 @@ function App() {
   const [requestError, setRequestError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [runMeta, setRunMeta] = useState({ cacheStatus: '', cacheEntries: '' });
+  const [historyDocuments, setHistoryDocuments] = useState([]);
+  const [historyQueries, setHistoryQueries] = useState([]);
+  const [selectedHistoryDocument, setSelectedHistoryDocument] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
   const [health, setHealth] = useState({
     loading: true,
     error: '',
@@ -152,6 +180,84 @@ function App() {
     void refreshHealth();
   }, []);
 
+  function getAuthHeader() {
+    return { Authorization: `Bearer ${token.trim()}` };
+  }
+
+  function validateHistoryAccess() {
+    if (!token.trim()) {
+      setHistoryError('API token is required.');
+      return false;
+    }
+
+    return true;
+  }
+
+  async function loadHistoryDocuments() {
+    if (!validateHistoryAccess()) {
+      return;
+    }
+
+    setHistoryLoading(true);
+    setHistoryError('');
+    setSelectedHistoryDocument(null);
+    setHistoryQueries([]);
+
+    try {
+      const response = await fetch(apiUrl('/history/documents'), {
+        headers: getAuthHeader(),
+      });
+      const payload = await readResponseBody(response);
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(payload, `History request failed with status ${response.status}.`));
+      }
+
+      setHistoryDocuments(Array.isArray(payload?.documents) ? payload.documents : []);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : 'Unable to load history.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function loadHistoryQueries(document) {
+    if (!validateHistoryAccess()) {
+      return;
+    }
+
+    setHistoryLoading(true);
+    setHistoryError('');
+    setSelectedHistoryDocument(document);
+    setHistoryQueries([]);
+
+    try {
+      const response = await fetch(apiUrl(`/history/documents/${encodeURIComponent(document.id)}/queries`), {
+        headers: getAuthHeader(),
+      });
+      const payload = await readResponseBody(response);
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(payload, `History request failed with status ${response.status}.`));
+      }
+
+      setHistoryQueries(Array.isArray(payload?.queries) ? payload.queries : []);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : 'Unable to load query history.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  function handleViewChange(nextView) {
+    setActiveView(nextView);
+    setHistoryError('');
+
+    if (nextView === 'history' && historyDocuments.length === 0 && token.trim()) {
+      void loadHistoryDocuments();
+    }
+  }
+
   function handleModeChange(nextMode) {
     setMode(nextMode);
     setFormError('');
@@ -189,6 +295,10 @@ function App() {
     setFormError('');
     setRequestError('');
     setRunMeta({ cacheStatus: '', cacheEntries: '' });
+    setHistoryDocuments([]);
+    setHistoryQueries([]);
+    setSelectedHistoryDocument(null);
+    setHistoryError('');
 
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -231,7 +341,7 @@ function App() {
     setIsSubmitting(true);
 
     try {
-      const authHeader = { Authorization: `Bearer ${token.trim()}` };
+      const authHeader = getAuthHeader();
       let response;
 
       if (mode === 'url') {
@@ -290,6 +400,21 @@ function App() {
         </p>
       </header>
 
+      <div className="view-switch" role="tablist" aria-label="Application view">
+        {VIEW_OPTIONS.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className={`view-button ${activeView === option.value ? 'is-active' : ''}`}
+            onClick={() => handleViewChange(option.value)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+
+      {activeView === 'query' ? (
+        <>
       <div className="top-grid">
         <form className="panel" onSubmit={handleSubmit}>
           <div className="panel-header">
@@ -561,6 +686,115 @@ function App() {
           ))}
         </div>
       </section>
+        </>
+      ) : (
+        <section className="panel history-panel">
+          <div className="panel-header">
+            <div>
+              <p className="panel-kicker">History</p>
+              <h2>{selectedHistoryDocument ? 'Document queries' : 'Documents'}</h2>
+            </div>
+            <div className="history-actions">
+              {selectedHistoryDocument ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => {
+                    setSelectedHistoryDocument(null);
+                    setHistoryQueries([]);
+                    setHistoryError('');
+                  }}
+                  disabled={historyLoading}
+                >
+                  Back
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => void loadHistoryDocuments()}
+                disabled={historyLoading}
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {selectedHistoryDocument ? (
+            <div className="history-context">
+              <p className="section-label">Selected document</p>
+              <h3>{formatDocumentTitle(selectedHistoryDocument)}</h3>
+              <p>
+                {selectedHistoryDocument.source_type} | {selectedHistoryDocument.chunk_count} chunks |{' '}
+                {selectedHistoryDocument.query_count} queries
+              </p>
+            </div>
+          ) : null}
+
+          {historyError ? <div className="notice notice-error">{historyError}</div> : null}
+
+          {historyLoading ? (
+            <div className="loading-box" aria-live="polite">
+              <span className="spinner" aria-hidden="true" />
+              Loading history...
+            </div>
+          ) : null}
+
+          {!historyLoading && !historyError && !selectedHistoryDocument && historyDocuments.length === 0 ? (
+            <div className="empty-state">No persisted documents found for the current user.</div>
+          ) : null}
+
+          {!historyLoading && !historyError && selectedHistoryDocument && historyQueries.length === 0 ? (
+            <div className="empty-state">No persisted queries found for this document.</div>
+          ) : null}
+
+          {!selectedHistoryDocument ? (
+            <div className="history-list">
+              {historyDocuments.map((document) => (
+                <button
+                  type="button"
+                  className="history-row"
+                  key={document.id}
+                  onClick={() => void loadHistoryQueries(document)}
+                >
+                  <span>
+                    <strong>{formatDocumentTitle(document)}</strong>
+                    <span className="history-meta">
+                      {document.source_type} | {document.status} | {formatDateTime(document.created_at)}
+                    </span>
+                  </span>
+                  <span className="history-counts">
+                    {document.chunk_count} chunks
+                    <br />
+                    {document.query_count} queries
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="history-list">
+              {historyQueries.map((query) => (
+                <article className="history-query" key={query.id}>
+                  <div className="history-query-header">
+                    <div>
+                      <p className="section-label">Question</p>
+                      <h3>{query.question}</h3>
+                    </div>
+                    <span className={`status-pill status-${query.status || 'error'}`}>
+                      {query.is_abstained ? 'Abstained' : ANSWER_STATUS_LABELS[query.status] || query.status || 'Unknown'}
+                    </span>
+                  </div>
+                  <p>{query.answer}</p>
+                  <div className="history-meta">
+                    {formatDateTime(query.created_at)}
+                    {Number.isFinite(query.latency_ms) ? ` | ${Math.round(query.latency_ms)} ms` : ''}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

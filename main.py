@@ -9,6 +9,7 @@ import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict, TypeVar
 
@@ -86,6 +87,46 @@ class QueryResponse(BaseModel):
     answers: List[AnswerItem]
 
 
+class HistoryDocumentItem(BaseModel):
+    id: str
+    filename: Optional[str]
+    source_type: str
+    source_url: Optional[str]
+    status: str
+    created_at: datetime
+    chunk_count: int
+    query_count: int
+
+
+class HistoryDocumentsResponse(BaseModel):
+    documents: List[HistoryDocumentItem]
+
+
+class HistoryQueryItem(BaseModel):
+    id: str
+    question: str
+    answer: str
+    is_abstained: bool
+    status: str
+    latency_ms: Optional[float]
+    created_at: datetime
+
+
+class HistoryQueriesResponse(BaseModel):
+    queries: List[HistoryQueryItem]
+
+
+class HistoryCitationItem(BaseModel):
+    rank: int
+    page_number: Optional[int]
+    excerpt: str
+    chunk_id: Optional[int]
+
+
+class HistoryCitationsResponse(BaseModel):
+    citations: List[HistoryCitationItem]
+
+
 app = FastAPI(title="Intelligent Document Query Engine", version="2.3.0")
 app.add_middleware(
     CORSMiddleware,
@@ -105,6 +146,7 @@ if not EXPECTED_TOKEN:
     raise RuntimeError("API_TOKEN environment variable is not set.")
 
 model_cache: Dict[str, object] = {}
+HISTORY_MAX_LIMIT = 100
 MAX_QUESTIONS_PER_REQUEST = 10
 MAX_PDF_BYTES = 15728640
 HTTP_TIMEOUT_SECONDS = 30
@@ -303,6 +345,10 @@ def _require_bearer_token(authorization: Optional[str]) -> None:
     scheme, _, token = (authorization or "").partition(" ")
     if scheme != "Bearer" or token != EXPECTED_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid or missing authorization token.")
+
+
+def _clamp_history_limit(limit: int) -> int:
+    return max(1, min(limit, HISTORY_MAX_LIMIT))
 
 
 def _normalize_questions(questions: List[Any]) -> List[str]:
@@ -1432,6 +1478,170 @@ async def upload_query_pipeline(
     )
 
 
+@app.get("/history/documents", response_model=HistoryDocumentsResponse)
+async def list_history_documents(
+    limit: int = HISTORY_MAX_LIMIT,
+    authorization: Optional[str] = Header(None),
+) -> HistoryDocumentsResponse:
+    _require_bearer_token(authorization)
+
+    try:
+        from sqlalchemy import func, select
+
+        from persistence.db import SessionLocal
+        from persistence.models import Chunk, Document, Query as StoredQuery
+        from persistence.user_context import get_current_user_id
+
+        user_id = get_current_user_id()
+        chunk_counts = (
+            select(Chunk.document_id, func.count(Chunk.id).label("chunk_count"))
+            .where(Chunk.user_id == user_id)
+            .group_by(Chunk.document_id)
+            .subquery()
+        )
+        query_counts = (
+            select(StoredQuery.document_id, func.count(StoredQuery.id).label("query_count"))
+            .where(StoredQuery.user_id == user_id)
+            .group_by(StoredQuery.document_id)
+            .subquery()
+        )
+        statement = (
+            select(
+                Document,
+                func.coalesce(chunk_counts.c.chunk_count, 0),
+                func.coalesce(query_counts.c.query_count, 0),
+            )
+            .outerjoin(chunk_counts, chunk_counts.c.document_id == Document.id)
+            .outerjoin(query_counts, query_counts.c.document_id == Document.id)
+            .where(Document.user_id == user_id)
+            .order_by(Document.created_at.desc())
+            .limit(_clamp_history_limit(limit))
+        )
+
+        with SessionLocal() as session:
+            rows = session.execute(statement).all()
+
+        return HistoryDocumentsResponse(
+            documents=[
+                HistoryDocumentItem(
+                    id=document.id,
+                    filename=document.filename,
+                    source_type=document.source_type,
+                    source_url=document.source_url,
+                    status=document.status,
+                    created_at=document.created_at,
+                    chunk_count=int(chunk_count or 0),
+                    query_count=int(query_count or 0),
+                )
+                for document, chunk_count, query_count in rows
+            ]
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("History document list failed safely: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="History is unavailable.") from exc
+
+
+@app.get("/history/documents/{document_id}/queries", response_model=HistoryQueriesResponse)
+async def list_history_document_queries(
+    document_id: str,
+    limit: int = HISTORY_MAX_LIMIT,
+    authorization: Optional[str] = Header(None),
+) -> HistoryQueriesResponse:
+    _require_bearer_token(authorization)
+
+    try:
+        from sqlalchemy import select
+
+        from persistence.db import SessionLocal
+        from persistence.models import Document, Query as StoredQuery
+        from persistence.user_context import get_current_user_id
+
+        user_id = get_current_user_id()
+        with SessionLocal() as session:
+            owned_document_id = session.execute(
+                select(Document.id).where(Document.id == document_id, Document.user_id == user_id)
+            ).scalar_one_or_none()
+            if owned_document_id is None:
+                raise HTTPException(status_code=404, detail="Document not found.")
+
+            rows = session.execute(
+                select(StoredQuery)
+                .where(StoredQuery.user_id == user_id, StoredQuery.document_id == document_id)
+                .order_by(StoredQuery.created_at.desc())
+                .limit(_clamp_history_limit(limit))
+            ).scalars().all()
+
+        return HistoryQueriesResponse(
+            queries=[
+                HistoryQueryItem(
+                    id=query.id,
+                    question=query.question,
+                    answer=query.answer,
+                    is_abstained=query.is_abstained,
+                    status=query.status,
+                    latency_ms=query.latency_ms,
+                    created_at=query.created_at,
+                )
+                for query in rows
+            ]
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("History query list failed safely: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="History is unavailable.") from exc
+
+
+@app.get("/history/queries/{query_id}/citations", response_model=HistoryCitationsResponse)
+async def list_history_query_citations(
+    query_id: str,
+    limit: int = HISTORY_MAX_LIMIT,
+    authorization: Optional[str] = Header(None),
+) -> HistoryCitationsResponse:
+    _require_bearer_token(authorization)
+
+    try:
+        from sqlalchemy import select
+
+        from persistence.db import SessionLocal
+        from persistence.models import Citation, Query as StoredQuery
+        from persistence.user_context import get_current_user_id
+
+        user_id = get_current_user_id()
+        with SessionLocal() as session:
+            owned_query_id = session.execute(
+                select(StoredQuery.id).where(StoredQuery.id == query_id, StoredQuery.user_id == user_id)
+            ).scalar_one_or_none()
+            if owned_query_id is None:
+                raise HTTPException(status_code=404, detail="Query not found.")
+
+            rows = session.execute(
+                select(Citation)
+                .where(Citation.user_id == user_id, Citation.query_id == query_id)
+                .order_by(Citation.rank.asc())
+                .limit(_clamp_history_limit(limit))
+            ).scalars().all()
+
+        return HistoryCitationsResponse(
+            citations=[
+                HistoryCitationItem(
+                    rank=citation.rank,
+                    page_number=citation.page_number,
+                    excerpt=citation.excerpt,
+                    chunk_id=citation.chunk_id,
+                )
+                for citation in rows
+            ]
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("History citation list failed safely: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="History is unavailable.") from exc
+
+
 @app.get("/health")
 async def health_check() -> Dict[str, object]:
     _evict_expired_document_cache_entries()
@@ -1457,7 +1667,11 @@ async def serve_frontend_root() -> FileResponse:
 
 @app.get("/{full_path:path}", include_in_schema=False)
 async def serve_frontend_spa(full_path: str) -> FileResponse:
-    if full_path.startswith("hackrx/") or full_path in {"hackrx", "health", "docs", "redoc", "openapi.json"}:
+    if (
+        full_path.startswith("hackrx/")
+        or full_path.startswith("history/")
+        or full_path in {"hackrx", "history", "health", "docs", "redoc", "openapi.json"}
+    ):
         raise HTTPException(status_code=404, detail="Not Found")
 
     asset_file = _resolve_frontend_asset(full_path)
