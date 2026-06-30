@@ -10,6 +10,10 @@ Intended production persistence uses a managed MySQL database supplied through
 the `DATABASE_URL` environment variable, for example with a
 `mysql+pymysql://...` SQLAlchemy URL.
 
+Managed MySQL requires TLS. Set `DB_CA_CERT` to the local CA certificate path so
+SQLAlchemy/PyMySQL can connect with certificate verification enabled. The CA
+certificate file is local deployment material and must not be committed.
+
 SQLite is only the local/development fallback for smoke testing and quick schema
 checks. If `DATABASE_URL` is not set, the persistence layer defaults to
 `sqlite:///./rag_persistence.db`.
