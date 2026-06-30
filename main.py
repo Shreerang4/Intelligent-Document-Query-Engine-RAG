@@ -17,7 +17,7 @@ import fitz
 import httpx
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from groq import Groq
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field, HttpUrl
 from persistence.ingestion import persist_ingested_document_best_effort
+from persistence.query_history import persist_query_result_best_effort
 
 if TYPE_CHECKING:
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -1109,9 +1110,34 @@ async def process_question(
     embedding_model: Any,
     reranker: Any,
     groq_client: Groq,
+    document_id: Optional[str] = None,
+    background_tasks: Optional[BackgroundTasks] = None,
 ) -> AnswerItem:
     """Run retrieval and generation for a single question without failing the batch."""
     loop = asyncio.get_running_loop()
+    started_at = time.perf_counter()
+
+    def schedule_query_persistence(answer_item: AnswerItem, source_chunks: List[ChunkRecord]) -> None:
+        if background_tasks is None or document_id is None:
+            return
+        background_tasks.add_task(
+            persist_query_result_best_effort,
+            document_id=document_id,
+            question=answer_item.question,
+            answer=answer_item.answer,
+            status=answer_item.status,
+            is_abstained=_is_non_informative_answer(answer_item.answer),
+            claim_verifications=answer_item.claim_verifications,
+            sources=answer_item.sources,
+            source_chunks=source_chunks,
+            embedding_model=get_embedding_model_name(),
+            retrieval_mode=get_retrieval_mode(),
+            reranker_model=get_reranker_model_name(),
+            k_initial=get_retrieval_k_initial(),
+            k_final=get_retrieval_k_final(),
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+        )
+
     try:
         context, source_chunks = await loop.run_in_executor(
             None,
@@ -1123,12 +1149,14 @@ async def process_question(
             reranker,
         )
         if not context:
-            return AnswerItem(
+            answer_item = AnswerItem(
                 question=question,
                 answer="Information not found in the document.",
                 status="no_context",
                 sources=[],
             )
+            schedule_query_persistence(answer_item, [])
+            return answer_item
 
         answer = await loop.run_in_executor(None, generate_answer, question, context, groq_client)
         claim_verifications: List[ClaimVerificationItem] = []
@@ -1146,21 +1174,25 @@ async def process_question(
         except Exception:
             logger.exception("Claim verification failed for question: %s", question)
 
-        return AnswerItem(
+        answer_item = AnswerItem(
             question=question,
             answer=answer,
             status="ok",
             sources=_build_source_references(source_chunks),
             claim_verifications=claim_verifications,
         )
+        schedule_query_persistence(answer_item, source_chunks)
+        return answer_item
     except Exception:
         logger.exception("Failed to process question: %s", question)
-        return AnswerItem(
+        answer_item = AnswerItem(
             question=question,
             answer="Failed to process this question.",
             status="error",
             sources=[],
         )
+        schedule_query_persistence(answer_item, [])
+        return answer_item
 
 
 def _evict_expired_document_cache_entries(now: Optional[float] = None) -> None:
@@ -1256,6 +1288,8 @@ async def _run_questions(
     embedding_model: Any,
     reranker: Any,
     groq_client: Groq,
+    document_id: Optional[str] = None,
+    background_tasks: Optional[BackgroundTasks] = None,
 ) -> QueryResponse:
     concurrency_limit = get_max_concurrent_questions()
     logger.info("Processing %s questions with concurrency limit %s.", len(questions), concurrency_limit)
@@ -1270,6 +1304,8 @@ async def _run_questions(
                 embedding_model,
                 reranker,
                 groq_client,
+                document_id,
+                background_tasks,
             )
 
     answers = await asyncio.gather(*(run_with_limit(question) for question in questions))
@@ -1280,6 +1316,7 @@ async def _run_questions(
 async def run_query_pipeline(
     request: QueryRequest,
     response: Response,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(None),
 ) -> QueryResponse:
     _require_bearer_token(authorization)
@@ -1297,7 +1334,7 @@ async def run_query_pipeline(
         lambda: load_and_chunk_pdf(url),
         embedding_model,
     )
-    persist_ingested_document_best_effort(
+    document_id = persist_ingested_document_best_effort(
         source_type="url",
         source_url=url,
         cache_key=cache_key,
@@ -1317,12 +1354,15 @@ async def run_query_pipeline(
         embedding_model,
         reranker,
         groq_client,
+        document_id,
+        background_tasks,
     )
 
 
 @app.post("/hackrx/upload-run", response_model=QueryResponse)
 async def upload_query_pipeline(
     response: Response,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     questions_json: str = Form(...),
     authorization: Optional[str] = Header(None),
@@ -1363,7 +1403,7 @@ async def upload_query_pipeline(
         _set_cache_headers(response, "MISS")
         logger.info("Document cached for upload input.")
 
-    persist_ingested_document_best_effort(
+    document_id = persist_ingested_document_best_effort(
         source_type="upload",
         filename=file.filename,
         pdf_bytes=pdf_bytes,
@@ -1387,6 +1427,8 @@ async def upload_query_pipeline(
         embedding_model,
         reranker,
         groq_client,
+        document_id,
+        background_tasks,
     )
 
 
