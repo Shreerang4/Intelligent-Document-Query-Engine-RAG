@@ -2,7 +2,7 @@
 
 Live demo: https://shreerangss-intelligent-document-query-engine.hf.space/
 
-GitHub repo: https://github.com/Shreerang4/Intelligent-Document-Query-Engine-RAG
+
 
 ## Overview
 
