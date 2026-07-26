@@ -1,4 +1,4 @@
-"""Best-effort persistence side effects for answered queries and citations."""
+"""Best-effort query history persistence used by the URL query path."""
 
 from __future__ import annotations
 
@@ -111,8 +111,9 @@ def _persist_query_result(
         if citation_rows:
             session.bulk_insert_mappings(Citation, citation_rows)
 
+        persisted_query_id = str(query.id)
         session.commit()
-        return query.id
+        return persisted_query_id
 
 
 def persist_query_result_best_effort(

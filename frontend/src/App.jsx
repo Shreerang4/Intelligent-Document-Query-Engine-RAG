@@ -122,6 +122,7 @@ function formatDocumentTitle(document) {
 
 function App() {
   const fileInputRef = useRef(null);
+  const pendingUploadRequestRef = useRef(null);
   const [activeView, setActiveView] = useState('query');
   const [mode, setMode] = useState('url');
   const [documentUrl, setDocumentUrl] = useState('');
@@ -262,6 +263,7 @@ function App() {
     setMode(nextMode);
     setFormError('');
     setRequestError('');
+    pendingUploadRequestRef.current = null;
   }
 
   function handleFileChange(event) {
@@ -299,6 +301,7 @@ function App() {
     setHistoryQueries([]);
     setSelectedHistoryDocument(null);
     setHistoryError('');
+    pendingUploadRequestRef.current = null;
 
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -357,9 +360,21 @@ function App() {
           }),
         });
       } else {
+        const questionsKey = JSON.stringify(questions);
+        const pendingRequest = pendingUploadRequestRef.current;
+        const requestId = pendingRequest?.file === selectedFile && pendingRequest.questionsKey === questionsKey
+          ? pendingRequest.requestId
+          : crypto.randomUUID();
+        pendingUploadRequestRef.current = {
+          file: selectedFile,
+          questionsKey,
+          requestId,
+        };
+
         const formData = new FormData();
         formData.append('file', selectedFile);
         formData.append('questions_json', JSON.stringify(questions));
+        formData.append('request_id', requestId);
 
         response = await fetch(apiUrl('/hackrx/upload-run'), {
           method: 'POST',
@@ -379,6 +394,9 @@ function App() {
         cacheStatus: response.headers.get('X-Document-Cache') || '',
         cacheEntries: response.headers.get('X-Cache-Entries') || '',
       });
+      if (mode === 'upload') {
+        pendingUploadRequestRef.current = null;
+      }
       await refreshHealth();
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : 'Request failed.');

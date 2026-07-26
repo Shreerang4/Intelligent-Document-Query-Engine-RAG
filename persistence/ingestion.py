@@ -1,4 +1,4 @@
-"""Best-effort persistence side effects for document ingestion."""
+"""Best-effort document ingestion persistence used by the URL query path."""
 
 from __future__ import annotations
 
@@ -93,8 +93,9 @@ def _persist_ingested_document(
         if chunk_rows:
             session.bulk_insert_mappings(Chunk, chunk_rows)
 
+        persisted_document_id = str(document.id)
         session.commit()
-        return document.id
+        return persisted_document_id
 
 
 def persist_ingested_document_best_effort(

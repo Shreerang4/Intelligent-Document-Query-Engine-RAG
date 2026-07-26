@@ -4,9 +4,22 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from persistence.db import Base
@@ -70,6 +83,7 @@ class Document(Base):
 
     __table_args__ = (
         Index("ix_documents_user_id_created_at", "user_id", "created_at"),
+        Index("ix_documents_user_id_source_hash", "user_id", "source_hash"),
     )
 
 
@@ -85,6 +99,9 @@ class Chunk(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     text_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     char_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    embedding_blob: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    embedding_dimension: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    embedding_dtype: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="chunks")
@@ -107,7 +124,9 @@ class Query(Base):
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     is_abstained: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    claim_verifications_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    request_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    claim_verifications_json: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
     retrieval_mode: Mapped[str] = mapped_column(String(64), nullable=False)
     reranker_model: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -122,6 +141,12 @@ class Query(Base):
 
     __table_args__ = (
         Index("ix_queries_user_id_document_id_created_at", "user_id", "document_id", "created_at"),
+        UniqueConstraint(
+            "user_id",
+            "request_id",
+            "request_index",
+            name="uq_queries_user_request_index",
+        ),
     )
 
 
