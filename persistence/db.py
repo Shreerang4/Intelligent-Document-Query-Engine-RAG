@@ -7,11 +7,13 @@ modify the database.
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from dotenv import load_dotenv
@@ -71,6 +73,44 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 
 class Base(DeclarativeBase):
     pass
+
+
+@contextmanager
+def mysql_document_lock(
+    session: Session,
+    *,
+    user_id: str,
+    document_key_parts: Sequence[str],
+    timeout_seconds: int = 30,
+) -> Iterator[None]:
+    """Serialize work for one document on MySQL; remain a no-op elsewhere."""
+    if session.get_bind().dialect.name != "mysql":
+        yield
+        return
+
+    raw_key = ":".join((user_id, *document_key_parts))
+    digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:48]
+    lock_name = f"rag-document:{digest}"
+    acquired = session.execute(
+        text("SELECT GET_LOCK(:lock_name, :timeout_seconds)"),
+        {"lock_name": lock_name, "timeout_seconds": timeout_seconds},
+    ).scalar_one()
+    if acquired != 1:
+        raise TimeoutError("Timed out waiting for the document persistence lock.")
+
+    try:
+        yield
+    finally:
+        try:
+            session.execute(
+                text("SELECT RELEASE_LOCK(:lock_name)"),
+                {"lock_name": lock_name},
+            )
+        except Exception:
+            try:
+                session.invalidate()
+            except Exception:
+                pass
 
 
 def get_session() -> Iterator[Session]:

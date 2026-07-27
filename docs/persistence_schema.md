@@ -64,18 +64,20 @@ Keeping eval data out of this schema avoids mixing production user history with
 benchmark-only records and keeps this slice focused on app-level document and
 query history.
 
-## Why Embeddings And FAISS Blobs Are Excluded
+## Persistent Embeddings And In-Memory FAISS
 
-The persistence layer stores source text and retrieval metadata, not vector
-artifacts. Embeddings and FAISS indexes are intentionally excluded from MySQL
-because:
+Upload ingestion stores one float32 E5 embedding beside each chunk. Each vector
+is serialized with `numpy.ndarray.tobytes()` and restored with
+`numpy.frombuffer(..., dtype=np.float32)`. The dimension and dtype are stored
+separately and validated before vectors are assembled into a contiguous matrix.
 
-- they can be regenerated from chunks and the recorded embedding config,
-- they are large compared with the relational metadata,
-- their binary format and compatibility depend on model/index implementation,
-- cache invalidation is already tied to embedding model and input format.
+FAISS itself remains process-local and in memory. On a RAM cache miss and MySQL
+hit, chunks are loaded strictly by `chunk_index`, their embeddings are restored,
+and the existing exact `IndexFlatL2` index is rebuilt without calling
+`embed_documents`.
 
-Future persistence can add a dedicated vector store or artifact cache if needed.
+Legacy chunk rows have nullable embedding columns. The first reuse of a legacy
+document embeds its stored chunk strings once and backfills those columns.
 
 ## Dedup Behavior
 
@@ -112,7 +114,10 @@ Stores one ingested PDF per user and the retrieval configuration used for it.
   `reranker_model`, `k_initial`, `k_final`
 - timestamps: `created_at`, `updated_at`
 
-Index: `documents(user_id, created_at)`.
+Indexes:
+
+- `documents(user_id, created_at)`
+- `documents(user_id, source_hash)` for persistent artifact lookup
 
 ### `chunks`
 
@@ -122,6 +127,8 @@ Stores page-aware text chunks for a document.
 - `document_id` references `documents.id`
 - chunk identity: `chunk_id`, `chunk_index`
 - location/content: `page_number`, `text`, `text_hash`, `char_count`
+- embedding artifact: nullable `embedding_blob`, `embedding_dimension`,
+  `embedding_dtype` (`float32`)
 - timestamp: `created_at`
 
 Indexes:
@@ -136,13 +143,18 @@ Stores one question/answer result against a persisted document.
 - `user_id` references `users.id`
 - `document_id` references `documents.id`
 - answer fields: `question`, `answer`, `status`, `is_abstained`
+- optional retry identity: `request_id`, `request_index`
 - optional structured verification payload: `claim_verifications_json`
 - retrieval config: `embedding_model`, `retrieval_mode`, `reranker_model`,
   `k_initial`, `k_final`
 - optional timing: `latency_ms`
 - timestamp: `created_at`
 
-Index: `queries(user_id, document_id, created_at)`.
+Indexes/constraints:
+
+- `queries(user_id, document_id, created_at)`
+- unique `queries(user_id, request_id, request_index)`; existing rows have NULL
+  request fields and do not conflict
 
 ### `citations`
 
@@ -169,3 +181,47 @@ Indexes:
 - A citation may point to a stored chunk through `chunk_db_id`; it also stores
   response-facing `chunk_id` and excerpt so citations remain readable even if a
   chunk relationship is unavailable.
+
+## Upload Persistence And Recovery
+
+New upload documents, chunks, embeddings, queries, and citations are committed
+in one transaction after all answers have been generated. Existing documents
+commit each new answer batch and its citations in one transaction before the
+HTTP response is returned. A failed transaction is rolled back completely while
+the already-generated answer is still returned.
+
+When an upload includes `request_id`, its question order is persisted through
+`request_index`. A retry with the same document and questions reconstructs the
+committed API response without extraction, embedding, retrieval, reranking, or
+Groq calls. Reusing the ID for different input returns HTTP 409.
+
+Concurrent inserts of the same upload are serialized in MySQL with a named
+advisory lock derived from `(user_id, source_hash)`. The document lookup index is
+not unique because historical duplicate documents may already exist.
+
+## Aiven MySQL Migration
+
+`Base.metadata.create_all()` does not alter existing tables. Apply
+`migrations/mysql/001_persistent_embeddings_and_request_recovery.sql` to the
+Aiven database before deploying this application version.
+
+1. Back up the production database and apply the migration to staging first.
+2. Connect with the MySQL client using Aiven's host, port, username, database,
+   and CA certificate. Enter the password interactively.
+3. From the MySQL prompt, execute:
+
+```sql
+SOURCE migrations/mysql/001_persistent_embeddings_and_request_recovery.sql;
+```
+
+4. Verify the result:
+
+```sql
+SHOW COLUMNS FROM chunks LIKE 'embedding_%';
+SHOW COLUMNS FROM queries LIKE 'request_%';
+SHOW INDEX FROM documents WHERE Key_name = 'ix_documents_user_id_source_hash';
+SHOW INDEX FROM queries WHERE Key_name = 'uq_queries_user_request_index';
+```
+
+The migration checks `information_schema` before every change, so it can be run
+again safely after an interrupted deployment.

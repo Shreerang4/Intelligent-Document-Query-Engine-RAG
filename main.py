@@ -7,11 +7,11 @@ import os
 import re
 import time
 import unicodedata
+import uuid
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypedDict, TypeVar
 
 import faiss
 import fitz
@@ -24,9 +24,37 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from groq import Groq
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel
+
+from backend.app.schemas import (
+    AnswerItem,
+    ClaimVerificationItem,
+    ClaimVerificationSource,
+    HistoryCitationItem,
+    HistoryCitationsResponse,
+    HistoryDocumentItem,
+    HistoryDocumentsResponse,
+    HistoryQueriesResponse,
+    HistoryQueryItem,
+    QueryRequest,
+    QueryResponse,
+    SourceReference,
+)
+from persistence.document_artifacts import (
+    ArtifactValidationError,
+    StoredDocumentArtifacts,
+    load_document_artifacts,
+    load_or_backfill_document_embeddings,
+)
 from persistence.ingestion import persist_ingested_document_best_effort
 from persistence.query_history import persist_query_result_best_effort
+from persistence.upload_results import (
+    RecoveredUploadResult,
+    RequestConflictError,
+    persist_upload_result_atomic,
+    recover_upload_request,
+)
+from persistence.user_context import get_current_user_id
 
 if TYPE_CHECKING:
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -49,82 +77,6 @@ class ChunkRecord(TypedDict):
     text: str
     page: int
     chunk_id: int
-
-
-class QueryRequest(BaseModel):
-    documents: HttpUrl
-    questions: List[Any]
-
-
-class SourceReference(BaseModel):
-    page: int
-    chunk_id: int
-    excerpt: str
-
-
-class ClaimVerificationSource(BaseModel):
-    page: int
-    chunk_id: int
-    excerpt: str
-
-
-class ClaimVerificationItem(BaseModel):
-    claim: str
-    verdict: Literal["supported", "weakly_supported", "unsupported"]
-    rationale: str
-    sources: List[ClaimVerificationSource]
-
-
-class AnswerItem(BaseModel):
-    question: str
-    answer: str
-    status: str
-    sources: List[SourceReference]
-    claim_verifications: List[ClaimVerificationItem] = Field(default_factory=list)
-
-
-class QueryResponse(BaseModel):
-    answers: List[AnswerItem]
-
-
-class HistoryDocumentItem(BaseModel):
-    id: str
-    filename: Optional[str]
-    source_type: str
-    source_url: Optional[str]
-    status: str
-    created_at: datetime
-    chunk_count: int
-    query_count: int
-
-
-class HistoryDocumentsResponse(BaseModel):
-    documents: List[HistoryDocumentItem]
-
-
-class HistoryQueryItem(BaseModel):
-    id: str
-    question: str
-    answer: str
-    is_abstained: bool
-    status: str
-    latency_ms: Optional[float]
-    created_at: datetime
-
-
-class HistoryQueriesResponse(BaseModel):
-    queries: List[HistoryQueryItem]
-
-
-class HistoryCitationItem(BaseModel):
-    rank: int
-    page_number: Optional[int]
-    excerpt: str
-    chunk_id: Optional[int]
-
-
-class HistoryCitationsResponse(BaseModel):
-    citations: List[HistoryCitationItem]
 
 
 app = FastAPI(title="Intelligent Document Query Engine", version="2.3.0")
@@ -177,6 +129,18 @@ class DocumentCacheEntry:
     faiss_index: faiss.IndexFlatL2
     created_at: float
     last_accessed: float
+    document_id: Optional[str] = None
+
+
+@dataclass
+class ProcessedQuestionResult:
+    answer_item: AnswerItem
+    source_chunks: List[ChunkRecord]
+    latency_ms: float
+
+    @property
+    def is_abstained(self) -> bool:
+        return _is_non_informative_answer(self.answer_item.answer)
 
 
 @dataclass
@@ -387,6 +351,16 @@ def _parse_upload_questions_json(questions_json: str) -> List[str]:
         raise HTTPException(status_code=400, detail="questions_json must be a JSON array of strings.")
 
     return _normalize_questions(parsed_questions)
+
+
+def _normalize_request_id(request_id: Optional[str]) -> Optional[str]:
+    normalized = (request_id or "").strip()
+    if not normalized:
+        return None
+    try:
+        return str(uuid.UUID(normalized))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="request_id must be a valid UUID.") from exc
 
 
 def _validate_pdf_response_headers(response: httpx.Response) -> None:
@@ -733,7 +707,7 @@ async def load_and_chunk_pdf(url: str) -> List[ChunkRecord]:
     if parsed_url.scheme not in {"http", "https"}:
         raise HTTPException(status_code=400, detail="Document URL must use http or https.")
 
-    logger.info("Downloading document from %s", url)
+    logger.info("Downloading URL document.")
     try:
         async with httpx.AsyncClient(
             timeout=get_http_timeout_seconds(),
@@ -750,7 +724,39 @@ async def load_and_chunk_pdf(url: str) -> List[ChunkRecord]:
         ) from exc
 
     _validate_pdf_response_headers(response)
-    return load_and_chunk_pdf_bytes(response.content)
+    return await asyncio.to_thread(load_and_chunk_pdf_bytes, response.content)
+
+
+def create_chunk_embeddings(
+    chunks: List[ChunkRecord],
+    embedding_model: Any,
+) -> np.ndarray:
+    """Create one contiguous float32 embedding row per chunk."""
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No text chunks to process.")
+
+    model_name = get_embedding_model_name()
+    chunk_texts = _format_documents_for_embedding([chunk["text"] for chunk in chunks], model_name)
+    chunk_embeddings = embedding_model.embed_documents(chunk_texts)
+    embedding_array = np.asarray(chunk_embeddings, dtype=np.float32)
+    if (
+        embedding_array.ndim != 2
+        or embedding_array.shape[0] != len(chunks)
+        or embedding_array.shape[1] == 0
+    ):
+        raise RuntimeError("Embedding model returned an invalid chunk embedding matrix.")
+    return np.ascontiguousarray(embedding_array, dtype=np.float32)
+
+
+def build_faiss_index(embedding_array: np.ndarray) -> faiss.IndexFlatL2:
+    """Build the existing exact L2 index from validated stored or new vectors."""
+    matrix = np.ascontiguousarray(embedding_array, dtype=np.float32)
+    if matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] == 0:
+        raise HTTPException(status_code=400, detail="No valid embeddings to index.")
+
+    index = faiss.IndexFlatL2(int(matrix.shape[1]))
+    index.add(matrix)
+    return index
 
 
 def create_vector_store(
@@ -761,13 +767,9 @@ def create_vector_store(
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks to process.")
 
-    logger.info("Creating embeddings and building FAISS index...")
-    model_name = get_embedding_model_name()
-    chunk_texts = _format_documents_for_embedding([chunk["text"] for chunk in chunks], model_name)
-    chunk_embeddings = embedding_model.embed_documents(chunk_texts)
-    embedding_array = np.array(chunk_embeddings, dtype="float32")
-    index = faiss.IndexFlatL2(embedding_array.shape[1])
-    index.add(embedding_array)
+    logger.info("Creating embeddings and building FAISS index.")
+    embedding_array = create_chunk_embeddings(chunks, embedding_model)
+    index = build_faiss_index(embedding_array)
     logger.info("FAISS index created with %s vectors.", index.ntotal)
     return index
 
@@ -899,7 +901,7 @@ def retrieve_hybrid_context(
 
     retrieved_chunks = list(merged_by_chunk_id.values())
     if not retrieved_chunks:
-        logger.info("No hybrid retrieved chunks for question: %r", question)
+        logger.info("Hybrid retrieval returned no chunks.")
         return "", []
 
     rerank_pairs = [[question, chunk["text"]] for chunk in retrieved_chunks]
@@ -911,8 +913,7 @@ def retrieve_hybrid_context(
         selected_chunks.append(chunk)
 
     logger.info(
-        "Hybrid retrieved chunk_ids for question %r: %s",
-        question,
+        "Hybrid retrieval selected chunk_ids=%s.",
         [chunk["chunk_id"] for chunk in selected_chunks],
     )
     return _build_context(selected_chunks), selected_chunks
@@ -945,7 +946,7 @@ def retrieve_context(
     valid_indices = [index for index in indices[0] if index != -1]
     retrieved_chunks = [chunks[index] for index in valid_indices]
     if not retrieved_chunks:
-        logger.info("No retrieved chunks for question: %r", question)
+        logger.info("Retrieval returned no chunks.")
         return "", []
 
     if use_reranker:
@@ -957,8 +958,7 @@ def retrieve_context(
         selected_chunks = retrieved_chunks[:k_final]
 
     logger.info(
-        "Retrieved chunk_ids for question %r: %s",
-        question,
+        "Retrieval selected chunk_ids=%s.",
         [chunk["chunk_id"] for chunk in selected_chunks],
     )
 
@@ -967,7 +967,7 @@ def retrieve_context(
 
 def generate_answer(question: str, context: str, client: Groq) -> str:
     """Call the Groq LLM to synthesize a grounded answer."""
-    logger.info("Generating answer for: '%s...'", question[:60])
+    logger.info("Generating grounded answer.")
     try:
         response = client.chat.completions.create(
             messages=[
@@ -1003,7 +1003,7 @@ def generate_answer(question: str, context: str, client: Groq) -> str:
             top_p=1,
         )
     except Exception as exc:
-        logger.error("LLM call failed: %s", exc)
+        logger.error("LLM call failed error=%s.", type(exc).__name__)
         raise RuntimeError("LLM call failed.") from exc
 
     return _clean_generated_answer_text(_extract_response_text(response))
@@ -1039,7 +1039,7 @@ def extract_claims(answer: str, client: Groq) -> List[str]:
         )
         raw_content = _extract_response_text(response)
     except Exception as exc:
-        logger.warning("Claim extraction failed: %s", exc)
+        logger.warning("Claim extraction failed error=%s.", type(exc).__name__)
         return _fallback_extract_claims(answer)
 
     return _parse_claim_extraction_output(raw_content, answer)
@@ -1149,40 +1149,16 @@ def verify_answer_claims(
     return claim_verifications
 
 
-async def process_question(
+async def _process_question_result(
     question: str,
     faiss_index: faiss.IndexFlatL2,
     chunks: List[ChunkRecord],
     embedding_model: Any,
     reranker: Any,
     groq_client: Groq,
-    document_id: Optional[str] = None,
-    background_tasks: Optional[BackgroundTasks] = None,
-) -> AnswerItem:
-    """Run retrieval and generation for a single question without failing the batch."""
+) -> ProcessedQuestionResult:
     loop = asyncio.get_running_loop()
     started_at = time.perf_counter()
-
-    def schedule_query_persistence(answer_item: AnswerItem, source_chunks: List[ChunkRecord]) -> None:
-        if background_tasks is None or document_id is None:
-            return
-        background_tasks.add_task(
-            persist_query_result_best_effort,
-            document_id=document_id,
-            question=answer_item.question,
-            answer=answer_item.answer,
-            status=answer_item.status,
-            is_abstained=_is_non_informative_answer(answer_item.answer),
-            claim_verifications=answer_item.claim_verifications,
-            sources=answer_item.sources,
-            source_chunks=source_chunks,
-            embedding_model=get_embedding_model_name(),
-            retrieval_mode=get_retrieval_mode(),
-            reranker_model=get_reranker_model_name(),
-            k_initial=get_retrieval_k_initial(),
-            k_final=get_retrieval_k_final(),
-            latency_ms=(time.perf_counter() - started_at) * 1000,
-        )
 
     try:
         context, source_chunks = await loop.run_in_executor(
@@ -1201,8 +1177,11 @@ async def process_question(
                 status="no_context",
                 sources=[],
             )
-            schedule_query_persistence(answer_item, [])
-            return answer_item
+            return ProcessedQuestionResult(
+                answer_item=answer_item,
+                source_chunks=[],
+                latency_ms=(time.perf_counter() - started_at) * 1000,
+            )
 
         answer = await loop.run_in_executor(None, generate_answer, question, context, groq_client)
         claim_verifications: List[ClaimVerificationItem] = []
@@ -1218,7 +1197,7 @@ async def process_question(
                 groq_client,
             )
         except Exception:
-            logger.exception("Claim verification failed for question: %s", question)
+            logger.exception("Claim verification failed for a question.")
 
         answer_item = AnswerItem(
             question=question,
@@ -1227,18 +1206,64 @@ async def process_question(
             sources=_build_source_references(source_chunks),
             claim_verifications=claim_verifications,
         )
-        schedule_query_persistence(answer_item, source_chunks)
-        return answer_item
+        return ProcessedQuestionResult(
+            answer_item=answer_item,
+            source_chunks=source_chunks,
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+        )
     except Exception:
-        logger.exception("Failed to process question: %s", question)
+        logger.exception("Failed to process a question.")
         answer_item = AnswerItem(
             question=question,
             answer="Failed to process this question.",
             status="error",
             sources=[],
         )
-        schedule_query_persistence(answer_item, [])
-        return answer_item
+        return ProcessedQuestionResult(
+            answer_item=answer_item,
+            source_chunks=[],
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+        )
+
+
+async def process_question(
+    question: str,
+    faiss_index: faiss.IndexFlatL2,
+    chunks: List[ChunkRecord],
+    embedding_model: Any,
+    reranker: Any,
+    groq_client: Groq,
+    document_id: Optional[str] = None,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> AnswerItem:
+    """Run one question and retain the URL path's best-effort history behavior."""
+    result = await _process_question_result(
+        question,
+        faiss_index,
+        chunks,
+        embedding_model,
+        reranker,
+        groq_client,
+    )
+    if background_tasks is not None and document_id is not None:
+        background_tasks.add_task(
+            persist_query_result_best_effort,
+            document_id=document_id,
+            question=result.answer_item.question,
+            answer=result.answer_item.answer,
+            status=result.answer_item.status,
+            is_abstained=result.is_abstained,
+            claim_verifications=result.answer_item.claim_verifications,
+            sources=result.answer_item.sources,
+            source_chunks=result.source_chunks,
+            embedding_model=get_embedding_model_name(),
+            retrieval_mode=get_retrieval_mode(),
+            reranker_model=get_reranker_model_name(),
+            k_initial=get_retrieval_k_initial(),
+            k_final=get_retrieval_k_final(),
+            latency_ms=result.latency_ms,
+        )
+    return result.answer_item
 
 
 def _evict_expired_document_cache_entries(now: Optional[float] = None) -> None:
@@ -1265,6 +1290,7 @@ def _set_document_cache_entry(
     chunks: List[ChunkRecord],
     faiss_index: faiss.IndexFlatL2,
     now: Optional[float] = None,
+    document_id: Optional[str] = None,
 ) -> None:
     current_time = time.time() if now is None else now
     _evict_expired_document_cache_entries(current_time)
@@ -1278,6 +1304,7 @@ def _set_document_cache_entry(
         faiss_index=faiss_index,
         created_at=current_time,
         last_accessed=current_time,
+        document_id=document_id,
     )
 
 
@@ -1320,11 +1347,37 @@ async def _get_cached_document(
         return cache_entry.chunks, cache_entry.faiss_index
 
     chunks = await chunk_loader()
-    faiss_index = create_vector_store(chunks, embedding_model)
+    faiss_index = await asyncio.to_thread(create_vector_store, chunks, embedding_model)
     _set_document_cache_entry(cache_key, chunks, faiss_index, now=current_time)
     _set_cache_headers(response, "MISS")
     logger.info("Document cached for %s input.", cache_key.split(":", 1)[0])
     return chunks, faiss_index
+
+
+async def _run_question_results(
+    questions: List[str],
+    faiss_index: faiss.IndexFlatL2,
+    chunks: List[ChunkRecord],
+    embedding_model: Any,
+    reranker: Any,
+    groq_client: Groq,
+) -> List[ProcessedQuestionResult]:
+    concurrency_limit = get_max_concurrent_questions()
+    logger.info("Processing %s questions with concurrency limit %s.", len(questions), concurrency_limit)
+    semaphore = asyncio.Semaphore(concurrency_limit)
+
+    async def run_with_limit(question: str) -> ProcessedQuestionResult:
+        async with semaphore:
+            return await _process_question_result(
+                question,
+                faiss_index,
+                chunks,
+                embedding_model,
+                reranker,
+                groq_client,
+            )
+
+    return list(await asyncio.gather(*(run_with_limit(question) for question in questions)))
 
 
 async def _run_questions(
@@ -1369,9 +1422,9 @@ async def run_query_pipeline(
     questions = _normalize_questions(request.questions)
 
     url = str(request.documents)
-    embedding_model = get_embedding_model()
-    reranker = get_reranker_model()
-    groq_client = get_groq_client()
+    embedding_model = await asyncio.to_thread(get_embedding_model)
+    reranker = await asyncio.to_thread(get_reranker_model)
+    groq_client = await asyncio.to_thread(get_groq_client)
 
     cache_key = _url_cache_key(url)
     chunks, faiss_index = await _get_cached_document(
@@ -1380,7 +1433,8 @@ async def run_query_pipeline(
         lambda: load_and_chunk_pdf(url),
         embedding_model,
     )
-    document_id = persist_ingested_document_best_effort(
+    document_id = await asyncio.to_thread(
+        persist_ingested_document_best_effort,
         source_type="url",
         source_url=url,
         cache_key=cache_key,
@@ -1411,14 +1465,18 @@ async def upload_query_pipeline(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     questions_json: str = Form(...),
+    request_id: Optional[str] = Form(None),
     authorization: Optional[str] = Header(None),
 ) -> QueryResponse:
     _require_bearer_token(authorization)
     questions = _parse_upload_questions_json(questions_json)
+    normalized_request_id = _normalize_request_id(request_id)
+    _ = background_tasks
 
     if not _is_supported_pdf_upload(file):
         raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
 
+    filename = file.filename
     try:
         pdf_bytes = await file.read()
     finally:
@@ -1429,53 +1487,228 @@ async def upload_query_pipeline(
     if len(pdf_bytes) > get_max_pdf_bytes():
         raise HTTPException(status_code=400, detail="PDF exceeds maximum allowed size.")
 
+    source_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    user_id = get_current_user_id()
+    if normalized_request_id is not None:
+        try:
+            recovered = await asyncio.to_thread(
+                recover_upload_request,
+                user_id=user_id,
+                request_id=normalized_request_id,
+                source_hash=source_hash,
+                questions=questions,
+            )
+        except RequestConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.warning(
+                "Upload recovery lookup failed request_id=%s error=%s.",
+                normalized_request_id,
+                type(exc).__name__,
+            )
+            recovered = None
+        if recovered is not None:
+            _set_cache_headers(response, "RECOVERED")
+            logger.info(
+                "Upload request recovered request_id=%s document_id=%s status=RECOVERED.",
+                normalized_request_id,
+                recovered.document_id,
+            )
+            return QueryResponse.model_validate(recovered.response_payload)
+
     cache_key = _upload_cache_key(pdf_bytes)
     current_time = time.time()
     _evict_expired_document_cache_entries(current_time)
 
     cache_entry = document_cache.get(cache_key)
+    embedding_matrix: Optional[np.ndarray] = None
+    cache_status: str
+    should_cache_after_persistence = False
     if cache_entry is not None:
         cache_entry.last_accessed = current_time
-        _set_cache_headers(response, "HIT")
-        logger.info("Document cache hit for upload input.")
+        cache_status = "RAM_HIT"
         chunks = cache_entry.chunks
         faiss_index = cache_entry.faiss_index
-        embedding_model = get_embedding_model()
+        proposed_document_id = cache_entry.document_id or str(uuid.uuid4())
     else:
-        chunks = load_and_chunk_pdf_bytes(pdf_bytes)
-        embedding_model = get_embedding_model()
-        faiss_index = create_vector_store(chunks, embedding_model)
-        _set_document_cache_entry(cache_key, chunks, faiss_index, now=current_time)
-        _set_cache_headers(response, "MISS")
-        logger.info("Document cached for upload input.")
+        artifacts: Optional[StoredDocumentArtifacts]
+        try:
+            artifacts = await asyncio.to_thread(
+                load_document_artifacts,
+                user_id=user_id,
+                source_hash=source_hash,
+                embedding_model=get_embedding_model_name(),
+                embedding_format=get_embedding_input_format_version(),
+            )
+        except ArtifactValidationError as exc:
+            logger.warning("Stored document artifacts are unusable error=%s.", type(exc).__name__)
+            artifacts = None
+        except Exception as exc:
+            logger.warning("Stored document lookup failed safely error=%s.", type(exc).__name__)
+            artifacts = None
 
-    document_id = persist_ingested_document_best_effort(
-        source_type="upload",
-        filename=file.filename,
-        pdf_bytes=pdf_bytes,
-        cache_key=cache_key,
-        chunks=chunks,
-        embedding_model=get_embedding_model_name(),
-        embedding_format=get_embedding_input_format_version(),
-        retrieval_mode=get_retrieval_mode(),
-        reranker_model=get_reranker_model_name(),
-        k_initial=get_retrieval_k_initial(),
-        k_final=get_retrieval_k_final(),
+        if artifacts is not None and artifacts.chunks:
+            cache_status = "MYSQL_HIT"
+            chunks = artifacts.chunks  # type: ignore[assignment]
+            proposed_document_id = artifacts.document_id
+            embedding_matrix = artifacts.embedding_matrix
+            embedding_model = await asyncio.to_thread(get_embedding_model)
+            if embedding_matrix is None:
+                generated_backfill_chunks: Optional[List[ChunkRecord]] = None
+                generated_backfill_matrix: Optional[np.ndarray] = None
+
+                def generate_backfill_embeddings(
+                    stored_chunks: List[ChunkRecord],
+                ) -> np.ndarray:
+                    nonlocal generated_backfill_chunks, generated_backfill_matrix
+                    generated_backfill_chunks = stored_chunks
+                    generated_backfill_matrix = create_chunk_embeddings(
+                        stored_chunks,
+                        embedding_model,
+                    )
+                    return generated_backfill_matrix
+
+                try:
+                    artifacts = await asyncio.to_thread(
+                        load_or_backfill_document_embeddings,
+                        user_id=user_id,
+                        document_id=artifacts.document_id,
+                        source_hash=source_hash,
+                        embedding_model=get_embedding_model_name(),
+                        embedding_format=get_embedding_input_format_version(),
+                        embedding_generator=generate_backfill_embeddings,
+                    )
+                    chunks = artifacts.chunks  # type: ignore[assignment]
+                    embedding_matrix = artifacts.embedding_matrix
+                except Exception as exc:
+                    logger.warning(
+                        "Embedding backfill failed document_id=%s error=%s.",
+                        artifacts.document_id,
+                        type(exc).__name__,
+                    )
+                    if generated_backfill_matrix is not None and generated_backfill_chunks is not None:
+                        chunks = generated_backfill_chunks
+                        embedding_matrix = generated_backfill_matrix
+                    else:
+                        embedding_matrix = await asyncio.to_thread(
+                            create_chunk_embeddings,
+                            chunks,
+                            embedding_model,
+                        )
+            faiss_index = await asyncio.to_thread(build_faiss_index, embedding_matrix)
+            _set_document_cache_entry(
+                cache_key,
+                chunks,
+                faiss_index,
+                now=current_time,
+                document_id=proposed_document_id,
+            )
+        else:
+            cache_status = "FULL_MISS"
+            chunks = await asyncio.to_thread(load_and_chunk_pdf_bytes, pdf_bytes)
+            embedding_model = await asyncio.to_thread(get_embedding_model)
+            embedding_matrix = await asyncio.to_thread(
+                create_chunk_embeddings,
+                chunks,
+                embedding_model,
+            )
+            faiss_index = await asyncio.to_thread(build_faiss_index, embedding_matrix)
+            proposed_document_id = str(uuid.uuid4())
+            should_cache_after_persistence = True
+
+    _set_cache_headers(response, cache_status)
+    logger.info(
+        "Upload cache flow request_id=%s document_id=%s status=%s.",
+        normalized_request_id,
+        proposed_document_id,
+        cache_status,
     )
 
-    reranker = get_reranker_model()
-    groq_client = get_groq_client()
-
-    return await _run_questions(
+    if cache_entry is not None:
+        embedding_model = await asyncio.to_thread(get_embedding_model)
+    reranker = await asyncio.to_thread(get_reranker_model)
+    groq_client = await asyncio.to_thread(get_groq_client)
+    processed_results = await _run_question_results(
         questions,
         faiss_index,
         chunks,
         embedding_model,
         reranker,
         groq_client,
-        document_id,
-        background_tasks,
     )
+    generated_response = QueryResponse(answers=[result.answer_item for result in processed_results])
+
+    persistence_succeeded = False
+    actual_document_id = proposed_document_id
+    try:
+        actual_document_id = await asyncio.to_thread(
+            persist_upload_result_atomic,
+            user_id=user_id,
+            proposed_document_id=proposed_document_id,
+            source_hash=source_hash,
+            filename=filename,
+            cache_key=cache_key,
+            chunks=chunks,
+            embedding_matrix=embedding_matrix,
+            question_results=processed_results,
+            request_id=normalized_request_id,
+            embedding_model=get_embedding_model_name(),
+            embedding_format=get_embedding_input_format_version(),
+            retrieval_mode=get_retrieval_mode(),
+            reranker_model=get_reranker_model_name(),
+            k_initial=get_retrieval_k_initial(),
+            k_final=get_retrieval_k_final(),
+        )
+        persistence_succeeded = True
+        logger.info(
+            "Upload persistence request_id=%s document_id=%s status=SUCCESS.",
+            normalized_request_id,
+            actual_document_id,
+        )
+    except Exception as exc:
+        if normalized_request_id is not None:
+            try:
+                recovered_after_race = await asyncio.to_thread(
+                    recover_upload_request,
+                    user_id=user_id,
+                    request_id=normalized_request_id,
+                    source_hash=source_hash,
+                    questions=questions,
+                )
+            except RequestConflictError as conflict_exc:
+                raise HTTPException(status_code=409, detail=str(conflict_exc)) from conflict_exc
+            except Exception:
+                recovered_after_race = None
+            if recovered_after_race is not None:
+                _set_document_cache_entry(
+                    cache_key,
+                    chunks,
+                    faiss_index,
+                    document_id=recovered_after_race.document_id,
+                )
+                _set_cache_headers(response, "RECOVERED")
+                return QueryResponse.model_validate(recovered_after_race.response_payload)
+
+        logger.warning(
+            "Upload persistence request_id=%s document_id=%s status=FAILED error=%s.",
+            normalized_request_id,
+            proposed_document_id,
+            type(exc).__name__,
+        )
+
+    if persistence_succeeded:
+        if should_cache_after_persistence:
+            _set_document_cache_entry(
+                cache_key,
+                chunks,
+                faiss_index,
+                document_id=actual_document_id,
+            )
+        elif cache_entry is not None:
+            cache_entry.document_id = actual_document_id
+        _set_cache_headers(response, cache_status)
+
+    return generated_response
 
 
 @app.get("/history/documents", response_model=HistoryDocumentsResponse)
@@ -1518,8 +1751,11 @@ async def list_history_documents(
             .limit(_clamp_history_limit(limit))
         )
 
-        with SessionLocal() as session:
-            rows = session.execute(statement).all()
+        def load_rows() -> List[Any]:
+            with SessionLocal() as session:
+                return list(session.execute(statement).all())
+
+        rows = await asyncio.to_thread(load_rows)
 
         return HistoryDocumentsResponse(
             documents=[
@@ -1559,19 +1795,24 @@ async def list_history_document_queries(
         from persistence.user_context import get_current_user_id
 
         user_id = get_current_user_id()
-        with SessionLocal() as session:
-            owned_document_id = session.execute(
-                select(Document.id).where(Document.id == document_id, Document.user_id == user_id)
-            ).scalar_one_or_none()
-            if owned_document_id is None:
-                raise HTTPException(status_code=404, detail="Document not found.")
+        def load_rows() -> List[Any]:
+            with SessionLocal() as session:
+                owned_document_id = session.execute(
+                    select(Document.id).where(Document.id == document_id, Document.user_id == user_id)
+                ).scalar_one_or_none()
+                if owned_document_id is None:
+                    raise HTTPException(status_code=404, detail="Document not found.")
 
-            rows = session.execute(
-                select(StoredQuery)
-                .where(StoredQuery.user_id == user_id, StoredQuery.document_id == document_id)
-                .order_by(StoredQuery.created_at.desc())
-                .limit(_clamp_history_limit(limit))
-            ).scalars().all()
+                return list(
+                    session.execute(
+                        select(StoredQuery)
+                        .where(StoredQuery.user_id == user_id, StoredQuery.document_id == document_id)
+                        .order_by(StoredQuery.created_at.desc())
+                        .limit(_clamp_history_limit(limit))
+                    ).scalars().all()
+                )
+
+        rows = await asyncio.to_thread(load_rows)
 
         return HistoryQueriesResponse(
             queries=[
@@ -1610,19 +1851,24 @@ async def list_history_query_citations(
         from persistence.user_context import get_current_user_id
 
         user_id = get_current_user_id()
-        with SessionLocal() as session:
-            owned_query_id = session.execute(
-                select(StoredQuery.id).where(StoredQuery.id == query_id, StoredQuery.user_id == user_id)
-            ).scalar_one_or_none()
-            if owned_query_id is None:
-                raise HTTPException(status_code=404, detail="Query not found.")
+        def load_rows() -> List[Any]:
+            with SessionLocal() as session:
+                owned_query_id = session.execute(
+                    select(StoredQuery.id).where(StoredQuery.id == query_id, StoredQuery.user_id == user_id)
+                ).scalar_one_or_none()
+                if owned_query_id is None:
+                    raise HTTPException(status_code=404, detail="Query not found.")
 
-            rows = session.execute(
-                select(Citation)
-                .where(Citation.user_id == user_id, Citation.query_id == query_id)
-                .order_by(Citation.rank.asc())
-                .limit(_clamp_history_limit(limit))
-            ).scalars().all()
+                return list(
+                    session.execute(
+                        select(Citation)
+                        .where(Citation.user_id == user_id, Citation.query_id == query_id)
+                        .order_by(Citation.rank.asc())
+                        .limit(_clamp_history_limit(limit))
+                    ).scalars().all()
+                )
+
+        rows = await asyncio.to_thread(load_rows)
 
         return HistoryCitationsResponse(
             citations=[
@@ -1653,12 +1899,15 @@ async def database_health_check(authorization: Optional[str] = Header(None)) -> 
         from persistence.models import User
         from persistence.user_context import get_current_user_id
 
-        with SessionLocal() as session:
-            session.execute(text("SELECT 1"))
-            user_seeded = (
-                session.execute(select(User.id).where(User.id == get_current_user_id())).scalar_one_or_none()
-                is not None
-            )
+        def check_database() -> bool:
+            with SessionLocal() as session:
+                session.execute(text("SELECT 1"))
+                return (
+                    session.execute(select(User.id).where(User.id == get_current_user_id())).scalar_one_or_none()
+                    is not None
+                )
+
+        user_seeded = await asyncio.to_thread(check_database)
 
         return {"database": "ok", "user_seeded": user_seeded}
     except HTTPException:

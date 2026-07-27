@@ -1,3 +1,13 @@
+---
+title: Intelligent Document Query Engine
+emoji: 📄
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Intelligent Document Query Engine - Full-Stack RAG Document QA
 
 Live demo: https://shreerangss-intelligent-document-query-engine.hf.space/
@@ -20,7 +30,10 @@ The Hugging Face live demo is updated with persistence enabled. The app defaults
 - Configurable embeddings through `EMBEDDING_MODEL_NAME`.
 - E5-small-v2 default: `intfloat/e5-small-v2` with correct `passage:` and `query:` prefixes.
 - MiniLM fallback/baseline: `all-MiniLM-L6-v2`.
-- In-memory FAISS vector search and embedding-aware document cache keys.
+- In-memory FAISS vector search with embedding-aware RAM cache keys.
+- Persistent upload chunks and float32 E5 embeddings in MySQL, allowing FAISS
+  reconstruction without re-embedding after a restart.
+- Optional upload `request_id` recovery for committed responses.
 - BM25 and E5+BM25 hybrid retrieval experiments behind `RETRIEVAL_MODE`.
 - CrossEncoder reranking, defaulting to `cross-encoder/ms-marco-TinyBERT-L-2-v2`.
 - Groq LLM answer generation, defaulting to `llama-3.1-8b-instant`.
@@ -31,7 +44,7 @@ The Hugging Face live demo is updated with persistence enabled. The app defaults
 
 ## Architecture
 
-`React UI -> FastAPI API -> PDF upload/URL ingestion -> PyMuPDF extraction -> chunking -> configurable embeddings -> FAISS/BM25 retrieval experiments -> CrossEncoder reranking -> Groq LLM -> source-grounded answers + claim verification -> MySQL history persistence`
+`React UI -> FastAPI API -> RAM/MySQL artifact lookup -> PDF extraction on full miss -> chunking -> embeddings -> FAISS/BM25 retrieval experiments -> CrossEncoder reranking -> Groq LLM -> source-grounded answers + claim verification -> atomic MySQL persistence`
 
 ```mermaid
 flowchart LR
@@ -233,6 +246,13 @@ Multipart form fields:
 
 - `file`: PDF file upload.
 - `questions_json`: JSON array of question strings.
+- `request_id`: optional client-generated UUID used to recover a successfully
+  committed response after a lost HTTP response.
+
+For uploads, the cache order is RAM, then MySQL chunks/embeddings, then complete
+PDF extraction and embedding. A committed `request_id` retry returns the stored
+answer without rerunning the RAG pipeline. Reusing an ID with different
+questions or a different PDF returns HTTP 409.
 
 ### `GET /health`
 
@@ -263,11 +283,23 @@ Protected by `Authorization: Bearer <API_TOKEN>`. Returns persisted source citat
 - Document indexes and model clients are process-local and in memory.
 - URL ingestion downloads caller-provided PDFs, so deployment environments should consider network egress and SSRF risk policies.
 
+## Existing Database Migration
+
+Before deploying this version against an existing Aiven MySQL database, run the
+idempotent migration in
+`migrations/mysql/001_persistent_embeddings_and_request_recovery.sql`. Detailed
+instructions and verification queries are in
+[`docs/persistence_schema.md`](docs/persistence_schema.md#aiven-mysql-migration).
+Running `scripts/init_db.py` alone is not sufficient because SQLAlchemy
+`create_all()` does not alter existing tables.
+
 ## Limitations
 
-- Cache is process-local memory and is cleared on container restart.
+- The first cache level is process-local memory and is cleared on container
+  restart; upload FAISS indexes are then rebuilt from persisted embeddings.
 - PDF extraction depends on embedded text; scanned/image-only PDFs are not OCR-processed.
-- FAISS indexes are rebuilt per uncached document and are not persisted to disk.
+- FAISS indexes remain in memory and are reconstructed from persisted upload
+  embeddings after a restart. URL-only ingestion retains its existing behavior.
 - OAuth is not implemented yet. The database schema has `user_id` columns and all current requests use the single `local-dev-user` placeholder.
 - The frontend uses a manually entered bearer token rather than an authenticated session flow.
 - Retrieval quality is improved but not perfect; remaining misses are documented in the benchmark summary.
