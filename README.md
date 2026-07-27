@@ -1,3 +1,13 @@
+---
+title: Intelligent Document Query Engine
+emoji: 📄
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Intelligent Document Query Engine - Full-Stack RAG Document QA
 
 Live demo: https://shreerangss-intelligent-document-query-engine.hf.space/
