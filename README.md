@@ -16,55 +16,83 @@ Live demo: https://shreerangss-intelligent-document-query-engine.hf.space/
 
 ## Overview
 
-Intelligent Document Query Engine is a full-stack PDF RAG application with an evaluated retrieval pipeline and persistent document/query history. It combines a React/Vite frontend with a FastAPI backend that ingests PDFs from a URL or upload, chunks extracted text, retrieves relevant evidence, reranks it, asks Groq to generate source-grounded answers with page/chunk citations and claim verification, and stores history in managed MySQL.
+Intelligent Document Query Engine is a production-deployed, multi-user PDF
+question-answering application. A React/Vite client sends authenticated requests
+to FastAPI, which parses and chunks PDFs, retrieves and reranks relevant evidence,
+uses Groq to generate grounded answers, and returns page/chunk citations. Users
+have private document and query history backed by Aiven MySQL.
 
-The Hugging Face live demo is updated with persistence enabled. The app defaults to E5-small-v2 for retrieval quality. MiniLM remains selectable through `EMBEDDING_MODEL_NAME` for fallback/baseline comparison.
+The project combines an evaluated RAG pipeline with production authentication,
+explicit ownership checks, restart-safe embedding persistence, and a same-origin
+deployment on Hugging Face Spaces. E5-small-v2 is the default embedding model;
+MiniLM remains available as a benchmark baseline.
 
-## Features
+## What the System Demonstrates
 
-- React/Vite UI for PDF URL ingestion and PDF upload.
-- Persistent document and query history backed by managed MySQL/Aiven.
-- FastAPI API with bearer-token protection for query endpoints.
-- PDF validation, download/upload handling, and PyMuPDF text extraction.
-- Page-aware chunking with 500-character chunks and 50-character overlap.
-- Configurable embeddings through `EMBEDDING_MODEL_NAME`.
-- E5-small-v2 default: `intfloat/e5-small-v2` with correct `passage:` and `query:` prefixes.
-- MiniLM fallback/baseline: `all-MiniLM-L6-v2`.
-- In-memory FAISS vector search with embedding-aware RAM cache keys.
-- Persistent upload chunks and float32 E5 embeddings in MySQL, allowing FAISS
-  reconstruction without re-embedding after a restart.
-- Optional upload `request_id` recovery for committed responses.
-- BM25 and E5+BM25 hybrid retrieval experiments behind `RETRIEVAL_MODE`.
-- CrossEncoder reranking, defaulting to `cross-encoder/ms-marco-TinyBERT-L-2-v2`.
-- Groq LLM answer generation, defaulting to `openai/gpt-oss-20b`.
-- Source-grounded responses with page number, chunk id, and excerpts.
-- Claim extraction and verification against retrieved evidence.
-- Explicit user-scoped persistent document, chunk, query, citation, and recovery operations.
-- Retrieval evaluation harness with benchmark reports and targeted probes.
+- React/Vite authentication lifecycle with the access JWT held only in memory,
+  automatic session restoration, and refresh-and-retry-once behavior.
+- FastAPI APIs protected by short-lived JWTs and explicit user-scoped
+  authorization for documents, chunks, queries, citations, and history.
+- Email/password authentication with Argon2id password hashing, ten-minute HS256
+  access JWTs, opaque rotating refresh tokens, and logout/session revocation.
+- Layered refresh concurrency control: a same-tab `refreshPromise`, the browser
+  Web Locks API across tabs, and MySQL/InnoDB row locks on the server.
+- PDF URL and upload ingestion, PyMuPDF extraction, page-aware chunking,
+  E5-small-v2 embeddings, FAISS retrieval, TinyBERT CrossEncoder reranking, and
+  Groq generation with evidence and citations.
+- MySQL-persisted float32 embeddings and request-id recovery, allowing upload
+  FAISS indexes and committed responses to be reconstructed after a restart.
+- Retrieval evaluation across lexical, paraphrase, conceptual, and distractor
+  questions, with MiniLM and hybrid-search comparisons.
 
 ## Architecture
 
-`React UI -> FastAPI API -> RAM/MySQL artifact lookup -> PDF extraction on full miss -> chunking -> embeddings -> FAISS/BM25 retrieval experiments -> CrossEncoder reranking -> Groq LLM -> source-grounded answers + claim verification -> atomic MySQL persistence`
-
 ```mermaid
-flowchart LR
-    A[React UI] --> B[FastAPI API]
-    B --> C{PDF input}
-    C -->|Upload| D[UploadFile bytes]
-    C -->|URL| E[httpx PDF download]
-    D --> F[PyMuPDF extraction]
-    E --> F
-    F --> G[Text cleanup and chunking]
-    G --> H[Configurable embeddings]
-    H --> I[FAISS retrieval]
-    G --> J[BM25 lexical retrieval]
-    I --> K[CrossEncoder reranking]
-    J --> K
-    K --> L[Groq LLM answer generation]
-    L --> M[Claim verification]
-    M --> N[Source-grounded answer with excerpts]
-    N --> O[MySQL history tables]
+flowchart TD
+    Browser["Browser / React + Vite<br/>access JWT in memory"]
+    API["FastAPI<br/>JWT-protected APIs"]
+    Identity["JWT sub → user_id<br/>ownership enforcement"]
+    Auth["Auth endpoints<br/>rotating refresh sessions"]
+    Cache["User-scoped RAM / FAISS"]
+    RAG["PDF → E5-small-v2 → FAISS<br/>→ TinyBERT reranker"]
+    DB[("Aiven MySQL / InnoDB<br/>users, sessions, owned history,<br/>chunks and embeddings")]
+    Groq["Groq LLM<br/>openai/gpt-oss-20b"]
+
+    Browser -->|"Bearer access JWT"| API
+    Browser -->|"HttpOnly refresh cookie"| API
+    Browser -. "refreshPromise + Web Lock" .-> API
+    API --> Identity
+    API --> Auth
+    Identity --> Cache
+    Identity --> RAG
+    Identity --> DB
+    Auth -->|"SELECT ... FOR UPDATE"| DB
+    RAG <--> Cache
+    RAG <--> DB
+    RAG --> Groq
 ```
+
+### Important Engineering Decisions
+
+- **Authentication:** validated, normalized email addresses are stored directly
+  on users. Passwords are hashed with Argon2id. Access tokens are HS256 JWTs with
+  a 600-second default lifetime; refresh credentials are opaque and stored only
+  as an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. The database stores the
+  refresh-token SHA-256 digest, never the raw token.
+- **Refresh correctness:** callers in one tab share a single in-flight refresh;
+  the stable `idqe-auth-refresh` Web Lock serializes refresh HTTP dispatch across
+  same-origin tabs. InnoDB `SELECT ... FOR UPDATE` is the final correctness layer,
+  preventing a refresh session from branching during rotation.
+- **Authorization:** the validated JWT `sub` is the canonical `user_id` for RAG
+  and history requests. Persistent rows and RAM/FAISS entries are user-scoped.
+  Access to another user's private resource uses not-found behavior rather than
+  revealing that the resource exists.
+- **Recovery:** uploads check user-scoped RAM first, then persisted MySQL chunks
+  and embeddings, and only re-parse/re-embed on a full miss. A committed upload
+  can also be recovered safely by its optional `request_id`.
+- **Browser security:** production uses an enforcing Content Security Policy and
+  React's normal safe text rendering. The CSP contains neither `unsafe-inline`
+  nor `unsafe-eval`; cookie-backed auth POSTs also enforce origin/referer checks.
 
 ## Retrieval Evaluation
 
@@ -107,9 +135,9 @@ Backend variables referenced by the code:
 | `ACCESS_JWT_SECRET` | Yes | none | HS256 signing secret of at least 32 bytes for user access JWTs. |
 | `ACCESS_TOKEN_TTL_SECONDS` | No | `600` | Short-lived access-token lifetime in seconds. |
 | `REFRESH_COOKIE_SECURE` | No | `true` | Controls the refresh cookie's `Secure` attribute. Set explicitly to `false` only for plain-HTTP localhost development. |
-| `AUTH_ALLOWED_ORIGINS` | No | none | Optional comma-separated additional browser origins accepted by auth POST origin checks. Same-origin requests and the documented localhost frontend origins are accepted automatically. Wildcards are not supported. |
+| `AUTH_ALLOWED_ORIGINS` | No | none | Comma-separated exact browser origins additionally accepted by auth POST origin checks. Set the public origin when a reverse proxy changes the backend-observed origin. Documented localhost origins are accepted automatically; wildcards are rejected. |
 | `GROQ_API_KEY` | Yes | none | Used by the Groq SDK for answer generation and claim verification. |
-| `DATABASE_URL` | Production | `sqlite:///./rag_persistence.db` | SQLAlchemy database URL for persisted users, documents, chunks, queries, and citations. Production uses managed MySQL/Aiven. |
+| `DATABASE_URL` | Production | `sqlite:///./rag_persistence.db` | SQLAlchemy URL for users, refresh sessions, owned RAG history, chunks, and embeddings. Production uses Aiven MySQL. |
 | `DB_CA_CERT` | Local MySQL | none | Local path to the MySQL CA certificate for TLS verification. Do not commit this file. |
 | `DB_CA_CERT_B64` | HF MySQL | none | Base64-encoded CA certificate secret decoded at startup for Hugging Face deployment. |
 | `DB_ALLOW_LOCAL_TEST_CERT_HOSTNAME_MISMATCH` | Local disposable MySQL only | `false` | Keeps CA/signature validation but permits MySQL Community Server's auto-generated certificate without a hostname. Rejected unless the host is loopback and the database name identifies a test/disposable database. Never set in production. |
@@ -208,77 +236,57 @@ docker run --rm -p 7860:7860 `
   --env API_TOKEN=your_operational_health_token `
   --env ACCESS_JWT_SECRET=replace-with-at-least-32-random-bytes `
   --env DATABASE_URL=your_database_url `
-  --env DB_CA_CERT=/path/to/ca.pem `
+  --env DB_CA_CERT_B64=your_base64_encoded_ca_certificate `
   intelligent-document-query-engine
 ```
 
 For Hugging Face Spaces:
 
 - Use the Docker SDK.
-- Configure `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, `ACCESS_JWT_SECRET`, and the operational `API_TOKEN` as Space secrets.
+- Configure `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`,
+  `ACCESS_JWT_SECRET`, and the operational `API_TOKEN` as Space secrets.
+- Set `AUTH_ALLOWED_ORIGINS` to the exact public Space origin when required by
+  the hosting proxy; it is configuration, not a secret.
 - Store the MySQL/Aiven CA certificate as `DB_CA_CERT_B64`; do not commit `certs/*.pem`.
 - Keep `app_port: 7860` in the README front matter.
 - The built React frontend is served by FastAPI from the same origin.
-- The live Hugging Face Space at https://shreerangss-intelligent-document-query-engine.hf.space/ is manually deployed and currently includes persistence.
-- OAuth is not implemented. Password-authenticated users and JWT-owned
-  RAG/history operations are supported.
+- The live Hugging Face Space uses Aiven MySQL over verified TLS and serves the
+  production React build and API from one origin.
 
-## API Endpoints
+## API Surface
 
 ### Authentication endpoints
 
-`POST /auth/register`, `POST /auth/login`, and `POST /auth/refresh` return a
-ten-minute access JWT in JSON and set the opaque refresh credential only in the
-host-only `idqe_refresh` cookie. The cookie is `HttpOnly`, `SameSite=Lax`, uses
-`Path=/auth`, and is `Secure` by default. `POST /auth/logout` revokes and clears
-only the current browser session. `GET /auth/me` uses the DB-backed access-token
-dependency and returns only public user fields.
+| Method and route | Purpose |
+| --- | --- |
+| `POST /auth/register` | Normalize email, create a password account, and start a session. |
+| `POST /auth/login` | Verify credentials and start a session. |
+| `POST /auth/refresh` | Rotate the browser-managed refresh credential and issue a new access JWT. |
+| `POST /auth/logout` | Revoke and clear the current refresh session. |
+| `GET /auth/me` | Return the current user's public account fields. |
 
-All auth POSTs validate browser `Origin` (or `Referer`) against the request
-origin, the explicit `AUTH_ALLOWED_ORIGINS` list, and the supported localhost
-frontend origins. Requests identified as cross-site are rejected; non-browser
-clients without browser origin metadata remain supported. This check is in
-addition to CORS and `SameSite`, not a replacement for either.
+Registration, login, and refresh return a ten-minute access JWT in JSON. The
+opaque refresh credential is confined to the host-only `idqe_refresh` cookie
+with `HttpOnly`, `Secure`, `SameSite=Lax`, and `Path=/auth`. The React client
+keeps each tab's access JWT in memory, restores sessions on page load, and
+retries an authenticated request at most once after refresh. It never reads the
+refresh cookie or persists/shares an access token.
 
-The React auth provider keeps `status`, `accessToken`, and `user` in JavaScript
-module memory only. On page load it renders a loading state while one raw
-`POST /auth/refresh` attempts to restore the session. Login, registration,
-refresh, and logout always use raw cookie-enabled requests, so refresh itself
-cannot enter the normal 401 retry path.
+### RAG and history endpoints
 
-Authenticated requests share one in-flight refresh promise per tab. Concurrent
-401 responses wait for that promise and retry their original request exactly
-once with the replacement access token. The actual refresh HTTP dispatch also
-runs inside the same-origin Web Lock named `idqe-auth-refresh`, serializing
-refresh-cookie rotation across tabs and windows. The request is constructed
-inside the lock callback so a waiting tab uses the latest browser-managed
-cookie. The JWT is never written to browser storage or a cookie. The refresh
-cookie remains `HttpOnly` and is never read by frontend code.
+| Method and route | Purpose |
+| --- | --- |
+| `POST /hackrx/run` | Run the RAG pipeline against a PDF URL. |
+| `POST /hackrx/upload-run` | Run the pipeline against an uploaded PDF; accepts an optional idempotent `request_id`. |
+| `GET /history/documents` | List documents owned by the JWT subject. |
+| `GET /history/documents/{document_id}/queries` | List queries for an owned document. |
+| `GET /history/queries/{query_id}/citations` | Return citations for an owned query. |
 
-The RAG and history clients use the same `authenticatedFetch()` path. Access
-JWTs come from the in-memory auth session, and a genuine authentication 401
-uses the existing refresh-and-retry-once lifecycle.
+All of these routes require `Authorization: Bearer <access JWT>`. Ownership is
+derived exclusively from the validated JWT subject. A private document or query
+owned by someone else is returned as not found.
 
-Each tab retains its own in-memory access JWT and same-tab single-flight
-promise, while the browser profile shares the refresh cookie and Web Lock.
-Access JWTs are not shared between tabs. If Web Locks are unavailable, the
-client falls back to the same-tab promise without polling, timers, storage
-locks, or token sharing; cross-tab simultaneous refresh then remains a UX edge
-case. Database `SELECT ... FOR UPDATE` remains the final server-side rotation
-correctness layer.
-
-### `POST /hackrx/run`
-
-Runs the RAG pipeline against a PDF available by URL.
-
-Headers:
-
-```http
-Authorization: Bearer <access JWT>
-Content-Type: application/json
-```
-
-Request body:
+Example URL request:
 
 ```json
 {
@@ -290,17 +298,7 @@ Request body:
 }
 ```
 
-### `POST /hackrx/upload-run`
-
-Runs the RAG pipeline against an uploaded PDF.
-
-Headers:
-
-```http
-Authorization: Bearer <access JWT>
-```
-
-Multipart form fields:
+The upload route accepts these multipart fields:
 
 - `file`: PDF file upload.
 - `questions_json`: JSON array of question strings.
@@ -312,73 +310,77 @@ PDF extraction and embedding. A committed `request_id` retry returns the stored
 answer without rerunning the RAG pipeline. Reusing an ID with different
 questions or a different PDF returns HTTP 409.
 
-### `GET /health`
+### Operational endpoints
 
-Returns service status, app version, cache entry count, and whether the embedding model, reranker, and Groq client have been loaded.
-
-### `GET /health/db`
-
-Protected by the separate operational `Authorization: Bearer <API_TOKEN>`.
-Runs only a safe database connectivity check. Application-user JWTs do not
-grant access to this diagnostic, and the response exposes no database host,
-credentials, or certificate data.
-
-### `GET /history/documents`
-
-Protected by `Authorization: Bearer <access JWT>`. Returns only documents owned by the JWT subject, including chunk and query counts.
-
-### `GET /history/documents/{document_id}/queries`
-
-Protected by `Authorization: Bearer <access JWT>`. Returns questions, answers, abstention status, and latency only when the document belongs to the JWT subject.
-
-### `GET /history/queries/{query_id}/citations`
-
-Protected by `Authorization: Bearer <access JWT>`. Returns persisted source citations only for a query owned by the JWT subject.
+- `GET /health` exposes non-sensitive service and model/cache readiness.
+- `GET /health/db` performs a safe database connectivity check and is the only
+  route protected by the separate operational `API_TOKEN`. User access JWTs do
+  not grant access to it.
 
 ## Security Notes
 
 - Do not commit `.env`, `.env.local`, or real API keys.
 - Do not commit database credentials or CA certificates.
-- Store `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, `ACCESS_JWT_SECRET`, and the operational `API_TOKEN` as Hugging Face Space secrets in production.
-- Query and history endpoints require an access JWT. `/health/db` separately requires the operational `API_TOKEN`.
-- Auth responses containing credentials use `Cache-Control: no-store`; raw refresh tokens never appear in JSON.
-- Document indexes and model clients are process-local and in memory.
+- Passwords use Argon2id; raw passwords and refresh tokens are never stored.
+- Access JWTs are short-lived and held only in frontend memory. Refresh tokens
+  are browser-managed `HttpOnly` cookies backed by revocable database sessions.
+- Query and history endpoints require an access JWT. The operational
+  `API_TOKEN` is separate from user authentication and applies only to
+  `/health/db`.
+- Cookie-backed auth POSTs reject untrusted browser origins using `Origin` or
+  `Referer` validation in addition to `SameSite=Lax` cookie behavior.
+- Production sends an enforcing CSP covering scripts, styles, images, fonts,
+  connections, frames, forms, objects, and base URIs. It allows neither
+  `unsafe-inline` nor `unsafe-eval`; React renders model and document text as
+  text rather than executable HTML.
+- Auth responses containing credentials use `Cache-Control: no-store`; raw
+  refresh tokens never appear in JSON.
 - URL ingestion downloads caller-provided PDFs, so deployment environments should consider network egress and SSRF risk policies.
 
-## Existing Database Migration
+## Persistence and Schema
 
-Before deploying this version against an existing Aiven MySQL database, run the
-idempotent migrations in numeric order, including
-`migrations/mysql/001_persistent_embeddings_and_request_recovery.sql` and
-`migrations/mysql/002_multi_user_auth.sql`. Migration 002 intentionally deletes
-the disposable `local-dev-user` history. Detailed instructions and verification queries are in
-[`docs/persistence_schema.md`](docs/persistence_schema.md#aiven-mysql-migration).
-Running `scripts/init_db.py` alone is not sufficient because SQLAlchemy
-`create_all()` does not alter existing tables.
+Production persistence uses Aiven MySQL/InnoDB over verified TLS. The schema
+contains users, rotating `refresh_sessions`, user-owned documents/chunks/
+queries/citations, persisted embeddings, and upload `request_id` idempotency.
+Foreign keys and ownership-aware queries keep account data isolated.
+
+The idempotent MySQL migrations are retained in numeric order under
+`migrations/mysql/`. Migration 001 adds persisted embeddings and request
+recovery; migration 002 introduces the production multi-user authentication
+schema and cleans obsolete placeholder-era data. Both have dedicated guarded
+rehearsal and real-MySQL integration coverage. New databases are initialized
+without seeded user identities. Schema details and verification queries live in
+[`docs/persistence_schema.md`](docs/persistence_schema.md); operational gates are
+in [`docs/production_readiness.md`](docs/production_readiness.md).
 
 ## Limitations
 
-- The first cache level is process-local memory and is cleared on container
-  restart; upload FAISS indexes are then rebuilt from persisted embeddings.
 - PDF extraction depends on embedded text; scanned/image-only PDFs are not OCR-processed.
 - FAISS indexes remain in memory and are reconstructed from persisted upload
-  embeddings after a restart. URL-only ingestion retains its existing behavior.
-- Persistent RAG helpers require an explicit existing `user_id` and enforce
-  database ownership. RAM document and FAISS entries are also keyed by an
-  explicit structural `(user_id, resource_key)` identity. RAG/history routes
-  supply that identity exclusively from the validated access-JWT subject.
+- In-memory caches are process-local, bounded, and cleared on restart; their
+  keys include user identity so cached artifacts cannot cross account scopes.
 - Retrieval quality is improved but not perfect; remaining misses are documented in the benchmark summary.
 
-## Lightweight Checks
+## Verification Commands
 
-Compile changed Python files:
+Backend tests and Python compilation:
 
 ```powershell
-.venv\Scripts\python.exe -m py_compile main.py eval\pipeline_adapter.py eval\runner.py eval\smoke_test.py
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe -m compileall -q main.py backend persistence eval scripts tests
+.venv\Scripts\python.exe -m pip check
 ```
 
-Run the metric unit tests:
+Frontend tests and production build:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest eval\test_metrics.py -q
+cd frontend
+npm test
+npm run build
+```
+
+Repository whitespace check:
+
+```powershell
+git diff --check
 ```
