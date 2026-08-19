@@ -1,3 +1,4 @@
+from backend.app.schemas.auth import AuthResponse, LoginRequest, PublicUser, RegisterRequest
 from backend.app.schemas.history import (
     HistoryCitationItem,
     HistoryCitationsResponse,
@@ -17,6 +18,7 @@ from backend.app.schemas.query import (
 
 __all__ = [
     "AnswerItem",
+    "AuthResponse",
     "ClaimVerificationItem",
     "ClaimVerificationSource",
     "HistoryCitationItem",
@@ -27,5 +29,8 @@ __all__ = [
     "HistoryQueryItem",
     "QueryRequest",
     "QueryResponse",
+    "LoginRequest",
+    "PublicUser",
+    "RegisterRequest",
     "SourceReference",
 ]

@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import { API_BASE_URL, getErrorMessage, rawApiFetch, readResponseBody } from './api/client.js';
+import AuthScreen from './auth/AuthScreen.jsx';
+import { useAuth } from './auth/AuthContext.jsx';
 import './App.css';
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
 const API_BASE_LABEL = API_BASE_URL || window.location.origin;
-
-function apiUrl(path) {
-  return `${API_BASE_URL}${path}`;
-}
 
 const MODE_OPTIONS = [
   { value: 'url', label: 'PDF URL' },
@@ -35,60 +33,6 @@ function parseQuestions(text) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-}
-
-async function readResponseBody(response) {
-  const contentType = response.headers.get('content-type') || '';
-
-  if (contentType.includes('application/json')) {
-    return response.json();
-  }
-
-  const text = await response.text();
-  if (!text) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-function getErrorMessage(payload, fallbackMessage) {
-  if (!payload) {
-    return fallbackMessage;
-  }
-
-  if (typeof payload === 'string') {
-    return payload;
-  }
-
-  if (typeof payload.detail === 'string') {
-    return payload.detail;
-  }
-
-  if (Array.isArray(payload.detail)) {
-    return payload.detail
-      .map((item) => {
-        if (typeof item === 'string') {
-          return item;
-        }
-        if (item && typeof item.msg === 'string') {
-          return item.msg;
-        }
-        return null;
-      })
-      .filter(Boolean)
-      .join(' ');
-  }
-
-  if (typeof payload.message === 'string') {
-    return payload.message;
-  }
-
-  return fallbackMessage;
 }
 
 function formatFileSize(bytes) {
@@ -120,7 +64,8 @@ function formatDocumentTitle(document) {
   return document.filename || document.source_url || `Document ${document.id.slice(0, 8)}`;
 }
 
-function App() {
+function AuthenticatedApp() {
+  const { user, logout, authenticatedFetch } = useAuth();
   const fileInputRef = useRef(null);
   const pendingUploadRequestRef = useRef(null);
   const [activeView, setActiveView] = useState('query');
@@ -128,12 +73,11 @@ function App() {
   const [documentUrl, setDocumentUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
   const [questionsText, setQuestionsText] = useState('');
-  const [token, setToken] = useState('');
-  const [showToken, setShowToken] = useState(false);
   const [answers, setAnswers] = useState([]);
   const [formError, setFormError] = useState('');
   const [requestError, setRequestError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [runMeta, setRunMeta] = useState({ cacheStatus: '', cacheEntries: '' });
   const [historyDocuments, setHistoryDocuments] = useState([]);
   const [historyQueries, setHistoryQueries] = useState([]);
@@ -156,7 +100,7 @@ function App() {
     }));
 
     try {
-      const response = await fetch(apiUrl('/health'));
+      const response = await rawApiFetch('/health');
       const payload = await readResponseBody(response);
 
       if (!response.ok) {
@@ -181,33 +125,14 @@ function App() {
     void refreshHealth();
   }, []);
 
-  function getAuthHeader() {
-    return { Authorization: `Bearer ${token.trim()}` };
-  }
-
-  function validateHistoryAccess() {
-    if (!token.trim()) {
-      setHistoryError('API token is required.');
-      return false;
-    }
-
-    return true;
-  }
-
   async function loadHistoryDocuments() {
-    if (!validateHistoryAccess()) {
-      return;
-    }
-
     setHistoryLoading(true);
     setHistoryError('');
     setSelectedHistoryDocument(null);
     setHistoryQueries([]);
 
     try {
-      const response = await fetch(apiUrl('/history/documents'), {
-        headers: getAuthHeader(),
-      });
+      const response = await authenticatedFetch('/history/documents');
       const payload = await readResponseBody(response);
 
       if (!response.ok) {
@@ -223,19 +148,15 @@ function App() {
   }
 
   async function loadHistoryQueries(document) {
-    if (!validateHistoryAccess()) {
-      return;
-    }
-
     setHistoryLoading(true);
     setHistoryError('');
     setSelectedHistoryDocument(document);
     setHistoryQueries([]);
 
     try {
-      const response = await fetch(apiUrl(`/history/documents/${encodeURIComponent(document.id)}/queries`), {
-        headers: getAuthHeader(),
-      });
+      const response = await authenticatedFetch(
+        `/history/documents/${encodeURIComponent(document.id)}/queries`,
+      );
       const payload = await readResponseBody(response);
 
       if (!response.ok) {
@@ -254,7 +175,7 @@ function App() {
     setActiveView(nextView);
     setHistoryError('');
 
-    if (nextView === 'history' && historyDocuments.length === 0 && token.trim()) {
+    if (nextView === 'history' && historyDocuments.length === 0) {
       void loadHistoryDocuments();
     }
   }
@@ -291,8 +212,6 @@ function App() {
     setDocumentUrl('');
     setSelectedFile(null);
     setQuestionsText('');
-    setToken('');
-    setShowToken(false);
     setAnswers([]);
     setFormError('');
     setRequestError('');
@@ -309,10 +228,6 @@ function App() {
   }
 
   function validateForm() {
-    if (!token.trim()) {
-      return 'API token is required.';
-    }
-
     if (mode === 'url' && !documentUrl.trim()) {
       return 'PDF URL is required.';
     }
@@ -344,14 +259,12 @@ function App() {
     setIsSubmitting(true);
 
     try {
-      const authHeader = getAuthHeader();
       let response;
 
       if (mode === 'url') {
-        response = await fetch(apiUrl('/hackrx/run'), {
+        response = await authenticatedFetch('/hackrx/run', {
           method: 'POST',
           headers: {
-            ...authHeader,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -376,9 +289,8 @@ function App() {
         formData.append('questions_json', JSON.stringify(questions));
         formData.append('request_id', requestId);
 
-        response = await fetch(apiUrl('/hackrx/upload-run'), {
+        response = await authenticatedFetch('/hackrx/upload-run', {
           method: 'POST',
-          headers: authHeader,
           body: formData,
         });
       }
@@ -405,17 +317,46 @@ function App() {
     }
   }
 
+  async function handleLogout() {
+    setIsLoggingOut(true);
+    try {
+      await logout();
+    } catch {
+      // The auth session records a safe notice and still clears all in-memory
+      // credentials. The login screen presents that server-revocation caveat.
+    } finally {
+      setIsLoggingOut(false);
+    }
+  }
+
   const healthStatusClass = health.loading ? 'checking' : health.data?.status === 'healthy' ? 'healthy' : 'unhealthy';
   const healthStatusLabel = health.loading ? 'Checking' : health.data?.status === 'healthy' ? 'Healthy' : 'Unhealthy';
 
   return (
     <div className="app-shell">
       <header className="hero">
-        <p className="eyebrow">Intelligent Document Query Engine</p>
-        <h1>Ask questions over PDF documents</h1>
-        <p className="hero-subtitle">
-          Ask questions over PDF documents using retrieval-augmented generation.
-        </p>
+        <div>
+          <p className="eyebrow">Intelligent Document Query Engine</p>
+          <h1>Ask questions over PDF documents</h1>
+          <p className="hero-subtitle">
+            Ask questions over PDF documents using retrieval-augmented generation.
+          </p>
+        </div>
+        <div className="account-menu">
+          <div>
+            <span className="account-label">Signed in as</span>
+            <strong>{user.display_name || user.email}</strong>
+            {user.display_name ? <span>{user.email}</span> : null}
+          </div>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => void handleLogout()}
+            disabled={isLoggingOut}
+          >
+            {isLoggingOut ? 'Signing out...' : 'Sign out'}
+          </button>
+        </div>
       </header>
 
       <div className="view-switch" role="tablist" aria-label="Application view">
@@ -494,26 +435,6 @@ function App() {
               onChange={(event) => setQuestionsText(event.target.value)}
             />
             <span className="field-help">Enter one question per line</span>
-          </label>
-
-          <label className="field">
-            <span className="field-label">Bearer token</span>
-            <div className="token-row">
-              <input
-                type={showToken ? 'text' : 'password'}
-                className="field-input"
-                placeholder="Paste the API token used by the backend"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-              />
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => setShowToken((current) => !current)}
-              >
-                {showToken ? 'Hide' : 'Show'}
-              </button>
-            </div>
           </label>
 
           {formError ? <div className="notice notice-error">{formError}</div> : null}
@@ -815,6 +736,30 @@ function App() {
       )}
     </div>
   );
+}
+
+function App() {
+  const { status } = useAuth();
+
+  if (status === 'loading') {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card auth-loading" aria-live="polite">
+          <span className="spinner" aria-hidden="true" />
+          <div>
+            <p className="eyebrow">Intelligent Document Query Engine</p>
+            <h1>Restoring your session</h1>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (status === 'unauthenticated') {
+    return <AuthScreen />;
+  }
+
+  return <AuthenticatedApp />;
 }
 
 export default App;

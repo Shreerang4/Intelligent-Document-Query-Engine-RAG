@@ -36,10 +36,10 @@ The Hugging Face live demo is updated with persistence enabled. The app defaults
 - Optional upload `request_id` recovery for committed responses.
 - BM25 and E5+BM25 hybrid retrieval experiments behind `RETRIEVAL_MODE`.
 - CrossEncoder reranking, defaulting to `cross-encoder/ms-marco-TinyBERT-L-2-v2`.
-- Groq LLM answer generation, defaulting to `llama-3.1-8b-instant`.
+- Groq LLM answer generation, defaulting to `openai/gpt-oss-20b`.
 - Source-grounded responses with page number, chunk id, and excerpts.
 - Claim extraction and verification against retrieved evidence.
-- Persistence-ready user ownership columns using the current `local-dev-user` placeholder until OAuth is added.
+- Explicit user-scoped persistent document, chunk, query, citation, and recovery operations.
 - Retrieval evaluation harness with benchmark reports and targeted probes.
 
 ## Architecture
@@ -93,17 +93,26 @@ Decision summary:
 
 See [docs/retrieval_evaluation.md](docs/retrieval_evaluation.md) for the detailed evaluation summary.
 
+Authentication, MySQL/InnoDB, migration-rehearsal, and production configuration
+gates are documented in
+[docs/production_readiness.md](docs/production_readiness.md).
+
 ## Configuration
 
 Backend variables referenced by the code:
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `API_TOKEN` | Yes | none | Bearer token required by query, history, and database health endpoints. |
+| `API_TOKEN` | `/health/db` only | none | Separate operational bearer token loaded lazily by the sensitive database diagnostic. It is not an application-user identity. |
+| `ACCESS_JWT_SECRET` | Yes | none | HS256 signing secret of at least 32 bytes for user access JWTs. |
+| `ACCESS_TOKEN_TTL_SECONDS` | No | `600` | Short-lived access-token lifetime in seconds. |
+| `REFRESH_COOKIE_SECURE` | No | `true` | Controls the refresh cookie's `Secure` attribute. Set explicitly to `false` only for plain-HTTP localhost development. |
+| `AUTH_ALLOWED_ORIGINS` | No | none | Optional comma-separated additional browser origins accepted by auth POST origin checks. Same-origin requests and the documented localhost frontend origins are accepted automatically. Wildcards are not supported. |
 | `GROQ_API_KEY` | Yes | none | Used by the Groq SDK for answer generation and claim verification. |
 | `DATABASE_URL` | Production | `sqlite:///./rag_persistence.db` | SQLAlchemy database URL for persisted users, documents, chunks, queries, and citations. Production uses managed MySQL/Aiven. |
 | `DB_CA_CERT` | Local MySQL | none | Local path to the MySQL CA certificate for TLS verification. Do not commit this file. |
 | `DB_CA_CERT_B64` | HF MySQL | none | Base64-encoded CA certificate secret decoded at startup for Hugging Face deployment. |
+| `DB_ALLOW_LOCAL_TEST_CERT_HOSTNAME_MISMATCH` | Local disposable MySQL only | `false` | Keeps CA/signature validation but permits MySQL Community Server's auto-generated certificate without a hostname. Rejected unless the host is loopback and the database name identifies a test/disposable database. Never set in production. |
 | `PORT` | No | `7860` | Uvicorn port used by `start.py`. |
 | `MAX_PDF_BYTES` | No | `15728640` | Maximum PDF size in bytes. |
 | `HTTP_TIMEOUT_SECONDS` | No | `30` | Timeout for PDF URL downloads. |
@@ -118,7 +127,7 @@ Backend variables referenced by the code:
 | `DOCUMENT_CACHE_TTL_SECONDS` | No | `3600` | Document cache TTL in seconds. |
 | `EMBEDDING_MODEL_NAME` | No | `intfloat/e5-small-v2` | Hugging Face embedding model name. Set `all-MiniLM-L6-v2` to use the MiniLM fallback/baseline. |
 | `RERANKER_MODEL_NAME` | No | `cross-encoder/ms-marco-TinyBERT-L-2-v2` | CrossEncoder reranker model name. |
-| `LLM_MODEL_NAME` | No | `llama-3.1-8b-instant` | Groq model name. |
+| `LLM_MODEL_NAME` | No | `openai/gpt-oss-20b` | Groq model name. |
 
 Frontend variable:
 
@@ -137,7 +146,9 @@ pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 $env:GROQ_API_KEY="your_groq_api_key"
-$env:API_TOKEN="your_local_api_token"
+$env:API_TOKEN="your_operational_health_token"
+$env:ACCESS_JWT_SECRET="replace-with-at-least-32-random-bytes"
+$env:REFRESH_COOKIE_SECURE="false"
 $env:DATABASE_URL="mysql+pymysql://..."
 $env:DB_CA_CERT="certs/ca.pem"
 $env:PORT="7860"
@@ -153,7 +164,10 @@ npm install
 npm run dev
 ```
 
-For local Vite development, set `VITE_API_BASE_URL` in `frontend/.env` to the backend URL.
+Local Vite development uses the same-origin proxy for `/auth`, `/hackrx`,
+`/history`, and `/health` by default. Leave `VITE_API_BASE_URL` empty unless a
+direct backend origin is specifically required; the proxy most closely matches
+production refresh-cookie behavior.
 
 ## Evaluation Commands
 
@@ -191,7 +205,8 @@ Build and run locally:
 docker build -t intelligent-document-query-engine .
 docker run --rm -p 7860:7860 `
   --env GROQ_API_KEY=your_groq_api_key `
-  --env API_TOKEN=your_api_token `
+  --env API_TOKEN=your_operational_health_token `
+  --env ACCESS_JWT_SECRET=replace-with-at-least-32-random-bytes `
   --env DATABASE_URL=your_database_url `
   --env DB_CA_CERT=/path/to/ca.pem `
   intelligent-document-query-engine
@@ -200,14 +215,57 @@ docker run --rm -p 7860:7860 `
 For Hugging Face Spaces:
 
 - Use the Docker SDK.
-- Configure `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, and `API_TOKEN` as Space secrets.
+- Configure `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, `ACCESS_JWT_SECRET`, and the operational `API_TOKEN` as Space secrets.
 - Store the MySQL/Aiven CA certificate as `DB_CA_CERT_B64`; do not commit `certs/*.pem`.
 - Keep `app_port: 7860` in the README front matter.
 - The built React frontend is served by FastAPI from the same origin.
 - The live Hugging Face Space at https://shreerangss-intelligent-document-query-engine.hf.space/ is manually deployed and currently includes persistence.
-- OAuth is not implemented yet. All persisted records currently use the stable `local-dev-user` placeholder until OAuth replaces `get_current_user_id()`.
+- OAuth is not implemented. Password-authenticated users and JWT-owned
+  RAG/history operations are supported.
 
 ## API Endpoints
+
+### Authentication endpoints
+
+`POST /auth/register`, `POST /auth/login`, and `POST /auth/refresh` return a
+ten-minute access JWT in JSON and set the opaque refresh credential only in the
+host-only `idqe_refresh` cookie. The cookie is `HttpOnly`, `SameSite=Lax`, uses
+`Path=/auth`, and is `Secure` by default. `POST /auth/logout` revokes and clears
+only the current browser session. `GET /auth/me` uses the DB-backed access-token
+dependency and returns only public user fields.
+
+All auth POSTs validate browser `Origin` (or `Referer`) against the request
+origin, the explicit `AUTH_ALLOWED_ORIGINS` list, and the supported localhost
+frontend origins. Requests identified as cross-site are rejected; non-browser
+clients without browser origin metadata remain supported. This check is in
+addition to CORS and `SameSite`, not a replacement for either.
+
+The React auth provider keeps `status`, `accessToken`, and `user` in JavaScript
+module memory only. On page load it renders a loading state while one raw
+`POST /auth/refresh` attempts to restore the session. Login, registration,
+refresh, and logout always use raw cookie-enabled requests, so refresh itself
+cannot enter the normal 401 retry path.
+
+Authenticated requests share one in-flight refresh promise per tab. Concurrent
+401 responses wait for that promise and retry their original request exactly
+once with the replacement access token. The actual refresh HTTP dispatch also
+runs inside the same-origin Web Lock named `idqe-auth-refresh`, serializing
+refresh-cookie rotation across tabs and windows. The request is constructed
+inside the lock callback so a waiting tab uses the latest browser-managed
+cookie. The JWT is never written to browser storage or a cookie. The refresh
+cookie remains `HttpOnly` and is never read by frontend code.
+
+The RAG and history clients use the same `authenticatedFetch()` path. Access
+JWTs come from the in-memory auth session, and a genuine authentication 401
+uses the existing refresh-and-retry-once lifecycle.
+
+Each tab retains its own in-memory access JWT and same-tab single-flight
+promise, while the browser profile shares the refresh cookie and Web Lock.
+Access JWTs are not shared between tabs. If Web Locks are unavailable, the
+client falls back to the same-tab promise without polling, timers, storage
+locks, or token sharing; cross-tab simultaneous refresh then remains a UX edge
+case. Database `SELECT ... FOR UPDATE` remains the final server-side rotation
+correctness layer.
 
 ### `POST /hackrx/run`
 
@@ -216,7 +274,7 @@ Runs the RAG pipeline against a PDF available by URL.
 Headers:
 
 ```http
-Authorization: Bearer <API_TOKEN>
+Authorization: Bearer <access JWT>
 Content-Type: application/json
 ```
 
@@ -239,7 +297,7 @@ Runs the RAG pipeline against an uploaded PDF.
 Headers:
 
 ```http
-Authorization: Bearer <API_TOKEN>
+Authorization: Bearer <access JWT>
 ```
 
 Multipart form fields:
@@ -260,35 +318,40 @@ Returns service status, app version, cache entry count, and whether the embeddin
 
 ### `GET /health/db`
 
-Protected by `Authorization: Bearer <API_TOKEN>`. Runs a safe database connectivity check and verifies the seeded `local-dev-user` exists. The response does not expose database host, credentials, certificate paths, or certificate contents.
+Protected by the separate operational `Authorization: Bearer <API_TOKEN>`.
+Runs only a safe database connectivity check. Application-user JWTs do not
+grant access to this diagnostic, and the response exposes no database host,
+credentials, or certificate data.
 
 ### `GET /history/documents`
 
-Protected by `Authorization: Bearer <API_TOKEN>`. Returns persisted documents for the current placeholder user, including chunk and query counts.
+Protected by `Authorization: Bearer <access JWT>`. Returns only documents owned by the JWT subject, including chunk and query counts.
 
 ### `GET /history/documents/{document_id}/queries`
 
-Protected by `Authorization: Bearer <API_TOKEN>`. Returns persisted questions, answers, abstention status, and latency for one document owned by the current placeholder user.
+Protected by `Authorization: Bearer <access JWT>`. Returns questions, answers, abstention status, and latency only when the document belongs to the JWT subject.
 
 ### `GET /history/queries/{query_id}/citations`
 
-Protected by `Authorization: Bearer <API_TOKEN>`. Returns persisted source citations for one stored query.
+Protected by `Authorization: Bearer <access JWT>`. Returns persisted source citations only for a query owned by the JWT subject.
 
 ## Security Notes
 
 - Do not commit `.env`, `.env.local`, or real API keys.
 - Do not commit database credentials or CA certificates.
-- Store `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, and `API_TOKEN` as Hugging Face Space secrets in production.
-- Query, history, and database health endpoints require `Authorization: Bearer <API_TOKEN>`.
+- Store `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`, `ACCESS_JWT_SECRET`, and the operational `API_TOKEN` as Hugging Face Space secrets in production.
+- Query and history endpoints require an access JWT. `/health/db` separately requires the operational `API_TOKEN`.
+- Auth responses containing credentials use `Cache-Control: no-store`; raw refresh tokens never appear in JSON.
 - Document indexes and model clients are process-local and in memory.
 - URL ingestion downloads caller-provided PDFs, so deployment environments should consider network egress and SSRF risk policies.
 
 ## Existing Database Migration
 
 Before deploying this version against an existing Aiven MySQL database, run the
-idempotent migration in
-`migrations/mysql/001_persistent_embeddings_and_request_recovery.sql`. Detailed
-instructions and verification queries are in
+idempotent migrations in numeric order, including
+`migrations/mysql/001_persistent_embeddings_and_request_recovery.sql` and
+`migrations/mysql/002_multi_user_auth.sql`. Migration 002 intentionally deletes
+the disposable `local-dev-user` history. Detailed instructions and verification queries are in
 [`docs/persistence_schema.md`](docs/persistence_schema.md#aiven-mysql-migration).
 Running `scripts/init_db.py` alone is not sufficient because SQLAlchemy
 `create_all()` does not alter existing tables.
@@ -300,8 +363,10 @@ Running `scripts/init_db.py` alone is not sufficient because SQLAlchemy
 - PDF extraction depends on embedded text; scanned/image-only PDFs are not OCR-processed.
 - FAISS indexes remain in memory and are reconstructed from persisted upload
   embeddings after a restart. URL-only ingestion retains its existing behavior.
-- OAuth is not implemented yet. The database schema has `user_id` columns and all current requests use the single `local-dev-user` placeholder.
-- The frontend uses a manually entered bearer token rather than an authenticated session flow.
+- Persistent RAG helpers require an explicit existing `user_id` and enforce
+  database ownership. RAM document and FAISS entries are also keyed by an
+  explicit structural `(user_id, resource_key)` identity. RAG/history routes
+  supply that identity exclusively from the validated access-JWT subject.
 - Retrieval quality is improved but not perfect; remaining misses are documented in the benchmark summary.
 
 ## Lightweight Checks

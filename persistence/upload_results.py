@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from persistence.db import mysql_document_lock
 from persistence.document_artifacts import ArtifactValidationError, serialize_embedding
+from persistence.ownership import require_existing_user
 
 
 class RequestConflictError(ValueError):
@@ -56,7 +57,7 @@ def persist_upload_result_atomic(
     k_final: int,
 ) -> str:
     from persistence.db import SessionLocal
-    from persistence.models import Chunk, Citation, Document, Query, User
+    from persistence.models import Chunk, Citation, Document, Query
 
     matrix: Optional[np.ndarray] = None
     if embedding_matrix is not None:
@@ -71,8 +72,7 @@ def persist_upload_result_atomic(
                 user_id=user_id,
                 document_key_parts=(source_hash,),
             ):
-                if session.get(User, user_id) is None:
-                    session.add(User(id=user_id))
+                require_existing_user(session, user_id)
 
                 document = session.execute(
                     select(Document)
@@ -263,7 +263,11 @@ def recover_upload_request(
         query_ids = [query.id for query in query_rows]
         citations = session.execute(
             select(Citation)
-            .where(Citation.user_id == user_id, Citation.query_id.in_(query_ids))
+            .where(
+                Citation.user_id == user_id,
+                Citation.document_id == document_id,
+                Citation.query_id.in_(query_ids),
+            )
             .order_by(Citation.query_id.asc(), Citation.rank.asc())
         ).scalars().all()
         citations_by_query: dict[str, list[Any]] = {query_id: [] for query_id in query_ids}

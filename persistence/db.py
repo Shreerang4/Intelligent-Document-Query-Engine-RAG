@@ -23,6 +23,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./rag_persistence.db")
 DB_CA_CERT_B64 = os.getenv("DB_CA_CERT_B64")
+LOCAL_CERT_HOSTNAME_OVERRIDE_ENV = "DB_ALLOW_LOCAL_TEST_CERT_HOSTNAME_MISMATCH"
 
 
 def _bootstrap_db_ca_cert_from_b64() -> str | None:
@@ -63,7 +64,20 @@ def _build_connect_args(database_url: str) -> dict:
     if not ca_path.exists():
         raise RuntimeError("DB_CA_CERT is configured, but the certificate file does not exist.")
 
-    return {"ssl": {"ca": str(ca_path)}}
+    ssl_options: dict[str, object] = {"ca": str(ca_path)}
+    allow_local_hostname_mismatch = os.getenv(LOCAL_CERT_HOSTNAME_OVERRIDE_ENV, "").strip().lower()
+    if allow_local_hostname_mismatch in {"1", "true", "yes", "on"}:
+        parsed = make_url(database_url)
+        database_name = (parsed.database or "").lower()
+        if parsed.host not in {"127.0.0.1", "localhost", "::1"} or not any(
+            marker in database_name for marker in ("test", "testing", "disposable")
+        ):
+            raise RuntimeError(
+                f"{LOCAL_CERT_HOSTNAME_OVERRIDE_ENV} is restricted to loopback disposable/test databases."
+            )
+        ssl_options["check_hostname"] = False
+
+    return {"ssl": ssl_options}
 
 
 _connect_args = _build_connect_args(DATABASE_URL)

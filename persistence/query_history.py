@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Optional, Sequence
 
-from persistence.user_context import get_current_user_id
+from persistence.ownership import require_existing_user, require_owned_document
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,8 @@ def _persist_query_result(
     }
 
     with SessionLocal() as session:
+        require_existing_user(session, user_id)
+        require_owned_document(session, user_id=user_id, document_id=document_id)
         query = Query(
             user_id=user_id,
             document_id=document_id,
@@ -82,6 +84,7 @@ def _persist_query_result(
         if chunk_ids:
             stored_chunks = session.execute(
                 select(Chunk).where(
+                    Chunk.user_id == user_id,
                     Chunk.document_id == document_id,
                     Chunk.chunk_id.in_(chunk_ids),
                 )
@@ -118,6 +121,7 @@ def _persist_query_result(
 
 def persist_query_result_best_effort(
     *,
+    user_id: str,
     document_id: Optional[str],
     question: str,
     answer: str,
@@ -140,7 +144,7 @@ def persist_query_result_best_effort(
     try:
         claim_payload = [_dump_model(item) for item in claim_verifications] if claim_verifications else None
         return _persist_query_result(
-            user_id=get_current_user_id(),
+            user_id=user_id,
             document_id=document_id,
             question=question,
             answer=answer,

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -18,7 +19,7 @@ import fitz
 import httpx
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -40,6 +41,11 @@ from backend.app.schemas import (
     QueryResponse,
     SourceReference,
 )
+from backend.app.auth.router import router as auth_router
+from backend.app.auth.config import get_auth_allowed_origins
+from backend.app.auth.dependencies import get_authenticated_user_id
+from backend.app.auth.http_errors import install_auth_http_error_handlers
+from backend.app.security_headers import install_security_headers
 from persistence.document_artifacts import (
     ArtifactValidationError,
     StoredDocumentArtifacts,
@@ -47,6 +53,12 @@ from persistence.document_artifacts import (
     load_or_backfill_document_embeddings,
 )
 from persistence.ingestion import persist_ingested_document_best_effort
+from persistence.history import (
+    list_user_document_queries,
+    list_user_documents,
+    list_user_query_citations,
+)
+from persistence.ownership import OwnedResourceNotFoundError
 from persistence.query_history import persist_query_result_best_effort
 from persistence.upload_results import (
     RecoveredUploadResult,
@@ -54,7 +66,6 @@ from persistence.upload_results import (
     persist_upload_result_atomic,
     recover_upload_request,
 )
-from persistence.user_context import get_current_user_id
 
 if TYPE_CHECKING:
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -80,22 +91,16 @@ class ChunkRecord(TypedDict):
 
 
 app = FastAPI(title="Intelligent Document Query Engine", version="2.3.0")
+install_auth_http_error_handlers(app)
+install_security_headers(app)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=sorted(get_auth_allowed_origins()),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-EXPECTED_TOKEN = os.getenv("API_TOKEN")
-if not EXPECTED_TOKEN:
-    raise RuntimeError("API_TOKEN environment variable is not set.")
+app.include_router(auth_router)
 
 model_cache: Dict[str, object] = {}
 HISTORY_MAX_LIMIT = 100
@@ -113,7 +118,7 @@ RETRIEVAL_MODE = "faiss_reranker"
 HYBRID_E5_K_INITIAL = 30
 HYBRID_BM25_K_INITIAL = 20
 HYBRID_K_FINAL = 5
-LLM_MODEL_NAME = "llama-3.1-8b-instant"
+LLM_MODEL_NAME = "openai/gpt-oss-20b"
 MAX_CLAIMS_PER_ANSWER = 5
 CLAIM_VERIFICATION_K_FINAL = 3
 CLAIM_VERIFICATION_FAILURE_MESSAGE = "Verification failed or evidence was insufficient."
@@ -123,8 +128,15 @@ SourceModelT = TypeVar("SourceModelT", bound=BaseModel)
 CLAIM_VERDICTS = {"supported", "weakly_supported", "unsupported"}
 
 
+@dataclass(frozen=True)
+class DocumentCacheKey:
+    user_id: str
+    resource_key: str
+
+
 @dataclass
 class DocumentCacheEntry:
+    user_id: str
     chunks: List[ChunkRecord]
     faiss_index: faiss.IndexFlatL2
     created_at: float
@@ -150,7 +162,7 @@ class BM25Index:
     average_document_length: float
 
 
-document_cache: Dict[str, DocumentCacheEntry] = {}
+document_cache: Dict[DocumentCacheKey, DocumentCacheEntry] = {}
 
 
 def _warn_invalid_int_setting(name: str, raw_value: str, default: int) -> None:
@@ -305,9 +317,15 @@ def get_groq_client() -> Groq:
     return model_cache["groq_client"]  # type: ignore[return-value]
 
 
-def _require_bearer_token(authorization: Optional[str]) -> None:
+def _require_operational_api_token(authorization: Optional[str]) -> None:
+    expected_token = os.getenv("API_TOKEN")
+    if expected_token is None or not expected_token.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="Operational database health authentication is not configured.",
+        )
     scheme, _, token = (authorization or "").partition(" ")
-    if scheme != "Bearer" or token != EXPECTED_TOKEN:
+    if scheme.lower() != "bearer" or not hmac.compare_digest(token, expected_token):
         raise HTTPException(status_code=401, detail="Invalid or missing authorization token.")
 
 
@@ -559,14 +577,26 @@ def _parse_claim_verification_output(
     )
 
 
-def _url_cache_key(url: str) -> str:
+def _owned_document_cache_key(user_id: str, resource_key: str) -> DocumentCacheKey:
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError("Document cache operations require a non-empty user_id.")
+    return DocumentCacheKey(user_id=user_id, resource_key=resource_key)
+
+
+def _url_cache_key(user_id: str, url: str) -> DocumentCacheKey:
     url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
-    return f"url:{_embedding_cache_namespace()}:{url_hash}"
+    return _owned_document_cache_key(
+        user_id,
+        f"url:{_embedding_cache_namespace()}:{url_hash}",
+    )
 
 
-def _upload_cache_key(pdf_bytes: bytes) -> str:
+def _upload_cache_key(user_id: str, pdf_bytes: bytes) -> DocumentCacheKey:
     pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
-    return f"upload:{_embedding_cache_namespace()}:{pdf_hash}"
+    return _owned_document_cache_key(
+        user_id,
+        f"upload:{_embedding_cache_namespace()}:{pdf_hash}",
+    )
 
 
 def _is_supported_pdf_upload(file: UploadFile) -> bool:
@@ -1233,6 +1263,7 @@ async def process_question(
     embedding_model: Any,
     reranker: Any,
     groq_client: Groq,
+    user_id: str,
     document_id: Optional[str] = None,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> AnswerItem:
@@ -1248,6 +1279,7 @@ async def process_question(
     if background_tasks is not None and document_id is not None:
         background_tasks.add_task(
             persist_query_result_best_effort,
+            user_id=user_id,
             document_id=document_id,
             question=result.answer_item.question,
             answer=result.answer_item.answer,
@@ -1285,13 +1317,40 @@ def _evict_lru_document_cache_entry() -> None:
     document_cache.pop(lru_cache_key, None)
 
 
+def _require_cache_key_owner(user_id: str, cache_key: DocumentCacheKey) -> None:
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError("Document cache operations require a non-empty user_id.")
+    if not isinstance(cache_key, DocumentCacheKey) or cache_key.user_id != user_id:
+        raise ValueError("Document cache key does not belong to the supplied user.")
+
+
+def _get_document_cache_entry(
+    *,
+    user_id: str,
+    cache_key: DocumentCacheKey,
+    now: Optional[float] = None,
+) -> Optional[DocumentCacheEntry]:
+    _require_cache_key_owner(user_id, cache_key)
+    current_time = time.time() if now is None else now
+    _evict_expired_document_cache_entries(current_time)
+    cache_entry = document_cache.get(cache_key)
+    if cache_entry is None:
+        return None
+    if cache_entry.user_id != user_id:
+        raise RuntimeError("Document cache entry ownership does not match its cache key.")
+    cache_entry.last_accessed = current_time
+    return cache_entry
+
+
 def _set_document_cache_entry(
-    cache_key: str,
+    user_id: str,
+    cache_key: DocumentCacheKey,
     chunks: List[ChunkRecord],
     faiss_index: faiss.IndexFlatL2,
     now: Optional[float] = None,
     document_id: Optional[str] = None,
 ) -> None:
+    _require_cache_key_owner(user_id, cache_key)
     current_time = time.time() if now is None else now
     _evict_expired_document_cache_entries(current_time)
     max_items = get_document_cache_max_items()
@@ -1300,6 +1359,7 @@ def _set_document_cache_entry(
             _evict_lru_document_cache_entry()
 
     document_cache[cache_key] = DocumentCacheEntry(
+        user_id=user_id,
         chunks=chunks,
         faiss_index=faiss_index,
         created_at=current_time,
@@ -1331,26 +1391,34 @@ def _resolve_frontend_asset(relative_path: str) -> Optional[Path]:
 
 
 async def _get_cached_document(
-    cache_key: str,
+    user_id: str,
+    cache_key: DocumentCacheKey,
     response: Response,
     chunk_loader: Callable[[], Awaitable[List[ChunkRecord]]],
     embedding_model: Any,
 ) -> Tuple[List[ChunkRecord], faiss.IndexFlatL2]:
     current_time = time.time()
-    _evict_expired_document_cache_entries(current_time)
-
-    cache_entry = document_cache.get(cache_key)
+    cache_entry = _get_document_cache_entry(
+        user_id=user_id,
+        cache_key=cache_key,
+        now=current_time,
+    )
     if cache_entry is not None:
-        cache_entry.last_accessed = current_time
-        logger.info("Document cache hit for %s input.", cache_key.split(":", 1)[0])
+        logger.info("Document cache hit for %s input.", cache_key.resource_key.split(":", 1)[0])
         _set_cache_headers(response, "HIT")
         return cache_entry.chunks, cache_entry.faiss_index
 
     chunks = await chunk_loader()
     faiss_index = await asyncio.to_thread(create_vector_store, chunks, embedding_model)
-    _set_document_cache_entry(cache_key, chunks, faiss_index, now=current_time)
+    _set_document_cache_entry(
+        user_id,
+        cache_key,
+        chunks,
+        faiss_index,
+        now=current_time,
+    )
     _set_cache_headers(response, "MISS")
-    logger.info("Document cached for %s input.", cache_key.split(":", 1)[0])
+    logger.info("Document cached for %s input.", cache_key.resource_key.split(":", 1)[0])
     return chunks, faiss_index
 
 
@@ -1387,6 +1455,7 @@ async def _run_questions(
     embedding_model: Any,
     reranker: Any,
     groq_client: Groq,
+    user_id: str,
     document_id: Optional[str] = None,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> QueryResponse:
@@ -1403,8 +1472,9 @@ async def _run_questions(
                 embedding_model,
                 reranker,
                 groq_client,
-                document_id,
-                background_tasks,
+                user_id=user_id,
+                document_id=document_id,
+                background_tasks=background_tasks,
             )
 
     answers = await asyncio.gather(*(run_with_limit(question) for question in questions))
@@ -1416,9 +1486,8 @@ async def run_query_pipeline(
     request: QueryRequest,
     response: Response,
     background_tasks: BackgroundTasks,
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_authenticated_user_id),
 ) -> QueryResponse:
-    _require_bearer_token(authorization)
     questions = _normalize_questions(request.questions)
 
     url = str(request.documents)
@@ -1426,8 +1495,9 @@ async def run_query_pipeline(
     reranker = await asyncio.to_thread(get_reranker_model)
     groq_client = await asyncio.to_thread(get_groq_client)
 
-    cache_key = _url_cache_key(url)
+    cache_key = _url_cache_key(user_id, url)
     chunks, faiss_index = await _get_cached_document(
+        user_id,
         cache_key,
         response,
         lambda: load_and_chunk_pdf(url),
@@ -1435,9 +1505,10 @@ async def run_query_pipeline(
     )
     document_id = await asyncio.to_thread(
         persist_ingested_document_best_effort,
+        user_id=user_id,
         source_type="url",
         source_url=url,
-        cache_key=cache_key,
+        cache_key=cache_key.resource_key,
         chunks=chunks,
         embedding_model=get_embedding_model_name(),
         embedding_format=get_embedding_input_format_version(),
@@ -1454,8 +1525,9 @@ async def run_query_pipeline(
         embedding_model,
         reranker,
         groq_client,
-        document_id,
-        background_tasks,
+        user_id=user_id,
+        document_id=document_id,
+        background_tasks=background_tasks,
     )
 
 
@@ -1466,9 +1538,8 @@ async def upload_query_pipeline(
     file: UploadFile = File(...),
     questions_json: str = Form(...),
     request_id: Optional[str] = Form(None),
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_authenticated_user_id),
 ) -> QueryResponse:
-    _require_bearer_token(authorization)
     questions = _parse_upload_questions_json(questions_json)
     normalized_request_id = _normalize_request_id(request_id)
     _ = background_tasks
@@ -1488,7 +1559,6 @@ async def upload_query_pipeline(
         raise HTTPException(status_code=400, detail="PDF exceeds maximum allowed size.")
 
     source_hash = hashlib.sha256(pdf_bytes).hexdigest()
-    user_id = get_current_user_id()
     if normalized_request_id is not None:
         try:
             recovered = await asyncio.to_thread(
@@ -1516,11 +1586,13 @@ async def upload_query_pipeline(
             )
             return QueryResponse.model_validate(recovered.response_payload)
 
-    cache_key = _upload_cache_key(pdf_bytes)
+    cache_key = _upload_cache_key(user_id, pdf_bytes)
     current_time = time.time()
-    _evict_expired_document_cache_entries(current_time)
-
-    cache_entry = document_cache.get(cache_key)
+    cache_entry = _get_document_cache_entry(
+        user_id=user_id,
+        cache_key=cache_key,
+        now=current_time,
+    )
     embedding_matrix: Optional[np.ndarray] = None
     cache_status: str
     should_cache_after_persistence = False
@@ -1597,6 +1669,7 @@ async def upload_query_pipeline(
                         )
             faiss_index = await asyncio.to_thread(build_faiss_index, embedding_matrix)
             _set_document_cache_entry(
+                user_id,
                 cache_key,
                 chunks,
                 faiss_index,
@@ -1647,7 +1720,7 @@ async def upload_query_pipeline(
             proposed_document_id=proposed_document_id,
             source_hash=source_hash,
             filename=filename,
-            cache_key=cache_key,
+            cache_key=cache_key.resource_key,
             chunks=chunks,
             embedding_matrix=embedding_matrix,
             question_results=processed_results,
@@ -1681,6 +1754,7 @@ async def upload_query_pipeline(
                 recovered_after_race = None
             if recovered_after_race is not None:
                 _set_document_cache_entry(
+                    user_id,
                     cache_key,
                     chunks,
                     faiss_index,
@@ -1699,6 +1773,7 @@ async def upload_query_pipeline(
     if persistence_succeeded:
         if should_cache_after_persistence:
             _set_document_cache_entry(
+                user_id,
                 cache_key,
                 chunks,
                 faiss_index,
@@ -1714,48 +1789,14 @@ async def upload_query_pipeline(
 @app.get("/history/documents", response_model=HistoryDocumentsResponse)
 async def list_history_documents(
     limit: int = HISTORY_MAX_LIMIT,
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_authenticated_user_id),
 ) -> HistoryDocumentsResponse:
-    _require_bearer_token(authorization)
-
     try:
-        from sqlalchemy import func, select
-
-        from persistence.db import SessionLocal
-        from persistence.models import Chunk, Document, Query as StoredQuery
-        from persistence.user_context import get_current_user_id
-
-        user_id = get_current_user_id()
-        chunk_counts = (
-            select(Chunk.document_id, func.count(Chunk.id).label("chunk_count"))
-            .where(Chunk.user_id == user_id)
-            .group_by(Chunk.document_id)
-            .subquery()
+        rows = await asyncio.to_thread(
+            list_user_documents,
+            user_id=user_id,
+            limit=_clamp_history_limit(limit),
         )
-        query_counts = (
-            select(StoredQuery.document_id, func.count(StoredQuery.id).label("query_count"))
-            .where(StoredQuery.user_id == user_id)
-            .group_by(StoredQuery.document_id)
-            .subquery()
-        )
-        statement = (
-            select(
-                Document,
-                func.coalesce(chunk_counts.c.chunk_count, 0),
-                func.coalesce(query_counts.c.query_count, 0),
-            )
-            .outerjoin(chunk_counts, chunk_counts.c.document_id == Document.id)
-            .outerjoin(query_counts, query_counts.c.document_id == Document.id)
-            .where(Document.user_id == user_id)
-            .order_by(Document.created_at.desc())
-            .limit(_clamp_history_limit(limit))
-        )
-
-        def load_rows() -> List[Any]:
-            with SessionLocal() as session:
-                return list(session.execute(statement).all())
-
-        rows = await asyncio.to_thread(load_rows)
 
         return HistoryDocumentsResponse(
             documents=[
@@ -1766,10 +1807,10 @@ async def list_history_documents(
                     source_url=document.source_url,
                     status=document.status,
                     created_at=document.created_at,
-                    chunk_count=int(chunk_count or 0),
-                    query_count=int(query_count or 0),
+                    chunk_count=document.chunk_count,
+                    query_count=document.query_count,
                 )
-                for document, chunk_count, query_count in rows
+                for document in rows
             ]
         )
     except HTTPException:
@@ -1783,36 +1824,15 @@ async def list_history_documents(
 async def list_history_document_queries(
     document_id: str,
     limit: int = HISTORY_MAX_LIMIT,
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_authenticated_user_id),
 ) -> HistoryQueriesResponse:
-    _require_bearer_token(authorization)
-
     try:
-        from sqlalchemy import select
-
-        from persistence.db import SessionLocal
-        from persistence.models import Document, Query as StoredQuery
-        from persistence.user_context import get_current_user_id
-
-        user_id = get_current_user_id()
-        def load_rows() -> List[Any]:
-            with SessionLocal() as session:
-                owned_document_id = session.execute(
-                    select(Document.id).where(Document.id == document_id, Document.user_id == user_id)
-                ).scalar_one_or_none()
-                if owned_document_id is None:
-                    raise HTTPException(status_code=404, detail="Document not found.")
-
-                return list(
-                    session.execute(
-                        select(StoredQuery)
-                        .where(StoredQuery.user_id == user_id, StoredQuery.document_id == document_id)
-                        .order_by(StoredQuery.created_at.desc())
-                        .limit(_clamp_history_limit(limit))
-                    ).scalars().all()
-                )
-
-        rows = await asyncio.to_thread(load_rows)
+        rows = await asyncio.to_thread(
+            list_user_document_queries,
+            user_id=user_id,
+            document_id=document_id,
+            limit=_clamp_history_limit(limit),
+        )
 
         return HistoryQueriesResponse(
             queries=[
@@ -1828,8 +1848,8 @@ async def list_history_document_queries(
                 for query in rows
             ]
         )
-    except HTTPException:
-        raise
+    except OwnedResourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Document not found.") from exc
     except Exception as exc:
         logger.warning("History query list failed safely: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="History is unavailable.") from exc
@@ -1839,36 +1859,15 @@ async def list_history_document_queries(
 async def list_history_query_citations(
     query_id: str,
     limit: int = HISTORY_MAX_LIMIT,
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_authenticated_user_id),
 ) -> HistoryCitationsResponse:
-    _require_bearer_token(authorization)
-
     try:
-        from sqlalchemy import select
-
-        from persistence.db import SessionLocal
-        from persistence.models import Citation, Query as StoredQuery
-        from persistence.user_context import get_current_user_id
-
-        user_id = get_current_user_id()
-        def load_rows() -> List[Any]:
-            with SessionLocal() as session:
-                owned_query_id = session.execute(
-                    select(StoredQuery.id).where(StoredQuery.id == query_id, StoredQuery.user_id == user_id)
-                ).scalar_one_or_none()
-                if owned_query_id is None:
-                    raise HTTPException(status_code=404, detail="Query not found.")
-
-                return list(
-                    session.execute(
-                        select(Citation)
-                        .where(Citation.user_id == user_id, Citation.query_id == query_id)
-                        .order_by(Citation.rank.asc())
-                        .limit(_clamp_history_limit(limit))
-                    ).scalars().all()
-                )
-
-        rows = await asyncio.to_thread(load_rows)
+        rows = await asyncio.to_thread(
+            list_user_query_citations,
+            user_id=user_id,
+            query_id=query_id,
+            limit=_clamp_history_limit(limit),
+        )
 
         return HistoryCitationsResponse(
             citations=[
@@ -1881,8 +1880,8 @@ async def list_history_query_citations(
                 for citation in rows
             ]
         )
-    except HTTPException:
-        raise
+    except OwnedResourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Query not found.") from exc
     except Exception as exc:
         logger.warning("History citation list failed safely: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="History is unavailable.") from exc
@@ -1890,26 +1889,20 @@ async def list_history_query_citations(
 
 @app.get("/health/db")
 async def database_health_check(authorization: Optional[str] = Header(None)) -> Dict[str, object]:
-    _require_bearer_token(authorization)
+    _require_operational_api_token(authorization)
 
     try:
-        from sqlalchemy import select, text
+        from sqlalchemy import text
 
         from persistence.db import SessionLocal
-        from persistence.models import User
-        from persistence.user_context import get_current_user_id
 
-        def check_database() -> bool:
+        def check_database() -> None:
             with SessionLocal() as session:
                 session.execute(text("SELECT 1"))
-                return (
-                    session.execute(select(User.id).where(User.id == get_current_user_id())).scalar_one_or_none()
-                    is not None
-                )
 
-        user_seeded = await asyncio.to_thread(check_database)
+        await asyncio.to_thread(check_database)
 
-        return {"database": "ok", "user_seeded": user_seeded}
+        return {"database": "ok"}
     except HTTPException:
         raise
     except Exception as exc:
@@ -1943,9 +1936,10 @@ async def serve_frontend_root() -> FileResponse:
 @app.get("/{full_path:path}", include_in_schema=False)
 async def serve_frontend_spa(full_path: str) -> FileResponse:
     if (
-        full_path.startswith("hackrx/")
+        full_path.startswith("auth/")
+        or full_path.startswith("hackrx/")
         or full_path.startswith("history/")
-        or full_path in {"hackrx", "history", "health", "docs", "redoc", "openapi.json"}
+        or full_path in {"auth", "hackrx", "history", "health", "docs", "redoc", "openapi.json"}
     ):
         raise HTTPException(status_code=404, detail="Not Found")
 

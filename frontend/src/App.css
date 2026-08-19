@@ -5,7 +5,121 @@
 }
 
 .hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 28px;
   margin-bottom: 28px;
+}
+
+.account-menu {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 270px;
+  padding: 14px 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: var(--panel-bg);
+  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.07);
+}
+
+.account-menu > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  flex: 1;
+}
+
+.account-menu strong,
+.account-menu span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-menu > div > span:not(.account-label) {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.account-label,
+.optional-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.auth-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 32px 18px;
+}
+
+.auth-card {
+  width: min(480px, 100%);
+  padding: 32px;
+  border: 1px solid var(--panel-border);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 32px 80px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(16px);
+}
+
+.auth-intro h1,
+.auth-loading h1 {
+  margin: 8px 0 10px;
+  font-size: clamp(1.9rem, 6vw, 2.7rem);
+  letter-spacing: -0.04em;
+}
+
+.auth-intro > p:last-child {
+  margin: 0;
+  color: var(--muted);
+}
+
+.auth-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 26px 0 24px;
+  padding: 6px;
+  border-radius: 16px;
+  background: var(--accent-soft);
+}
+
+.auth-mode-switch button {
+  padding: 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted-strong);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.auth-mode-switch button.is-active {
+  background: #ffffff;
+  color: var(--text-color);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.auth-submit {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.auth-loading {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.auth-loading h1 {
+  margin-bottom: 0;
 }
 
 .eyebrow,
@@ -71,7 +185,6 @@
 .claim-sources-header,
 .health-summary,
 .actions,
-.token-row,
 .health-grid,
 .source-meta {
   display: flex;
@@ -175,14 +288,6 @@
 .results-meta {
   color: var(--muted);
   font-size: 0.92rem;
-}
-
-.token-row {
-  gap: 10px;
-}
-
-.token-row .field-input {
-  flex: 1;
 }
 
 .actions {
@@ -446,6 +551,13 @@
   color: #8b1e18;
 }
 
+.notice-warning {
+  margin-bottom: 18px;
+  border-color: rgba(217, 119, 6, 0.25);
+  background: rgba(255, 251, 235, 0.94);
+  color: #92400e;
+}
+
 .spinner {
   width: 18px;
   height: 18px;
@@ -570,19 +682,32 @@
     padding: 20px;
   }
 
+  .hero,
+  .account-menu {
+    flex-direction: column;
+  }
+
+  .account-menu {
+    width: 100%;
+    min-width: 0;
+    align-items: stretch;
+  }
+
+  .auth-card {
+    padding: 24px 20px;
+  }
+
   .panel-header,
   .answer-header,
   .history-query-header,
   .source-header,
   .claim-card-header,
   .claim-sources-header,
-  .health-summary,
-  .token-row {
+  .health-summary {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .token-row .ghost-button,
   .actions button {
     width: 100%;
   }

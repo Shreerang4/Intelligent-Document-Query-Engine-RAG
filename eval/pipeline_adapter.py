@@ -12,12 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-# main.py checks API_TOKEN at import time for the HTTP endpoints.
-# The eval never calls those endpoints, so a placeholder satisfies the check.
-import os as _os
-if not _os.environ.get("API_TOKEN"):
-    _os.environ["API_TOKEN"] = "eval-placeholder"
-
 import main as pipeline  # the production backend
 
 

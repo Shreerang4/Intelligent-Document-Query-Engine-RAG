@@ -4,7 +4,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-import os
 import uuid
 
 import numpy as np
@@ -14,9 +13,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import persistence.db as persistence_db
-import persistence.user_context as user_context
-
-os.environ.setdefault("API_TOKEN", "test-api-token")
 
 import main
 from backend.app.schemas import AnswerItem, SourceReference
@@ -86,7 +82,15 @@ def _question_result(question: str = "What happened?") -> ProcessedQuestionResul
     )
 
 
+def _ensure_user(user_id: str = "user-1") -> None:
+    with persistence_db.SessionLocal() as session:
+        if session.get(User, user_id) is None:
+            session.add(User(id=user_id))
+            session.commit()
+
+
 def _persist_complete_request(request_id: str | None = None) -> str:
+    _ensure_user()
     return persist_upload_result_atomic(
         user_id="user-1",
         proposed_document_id=str(uuid.uuid4()),
@@ -151,6 +155,7 @@ def test_atomic_persistence_does_not_load_orm_state_after_commit(monkeypatch) ->
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=True, future=True)
     monkeypatch.setattr(persistence_db, "SessionLocal", factory)
+    _ensure_user()
     committed = False
 
     def mark_committed(_session) -> None:
@@ -375,6 +380,7 @@ def test_concurrent_legacy_backfill_embeds_document_once(tmp_path, monkeypatch) 
 
 
 def test_atomic_persistence_rolls_back_every_table_on_failure(session_factory) -> None:
+    _ensure_user()
     bad_result = _question_result()
     bad_result.answer_item.sources = [
         SourceReference(page=1, chunk_id=10, excerpt="valid"),
@@ -401,7 +407,7 @@ def test_atomic_persistence_rolls_back_every_table_on_failure(session_factory) -
         )
 
     with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(User)) == 0
+        assert session.scalar(select(func.count()).select_from(User)) == 1
         assert session.scalar(select(func.count()).select_from(Document)) == 0
         assert session.scalar(select(func.count()).select_from(Chunk)) == 0
         assert session.scalar(select(func.count()).select_from(Query)) == 0
@@ -444,22 +450,19 @@ def test_recovery_returns_committed_answer_and_rejects_different_input(session_f
 @pytest.mark.asyncio
 async def test_existing_history_endpoints_still_return_atomic_upload_rows(
     session_factory,
-    monkeypatch,
 ) -> None:
     document_id = _persist_complete_request(request_id=str(uuid.uuid4()))
-    monkeypatch.setattr(user_context, "get_current_user_id", lambda: "user-1")
-    authorization = f"Bearer {main.EXPECTED_TOKEN}"
 
-    documents = await main.list_history_documents(limit=100, authorization=authorization)
+    documents = await main.list_history_documents(limit=100, user_id="user-1")
     queries = await main.list_history_document_queries(
         document_id=document_id,
         limit=100,
-        authorization=authorization,
+        user_id="user-1",
     )
     citations = await main.list_history_query_citations(
         query_id=queries.queries[0].id,
         limit=100,
-        authorization=authorization,
+        user_id="user-1",
     )
 
     assert documents.documents[0].id == document_id

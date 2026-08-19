@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from sqlalchemy import (
+    BINARY,
     Boolean,
     DateTime,
     Float,
@@ -32,10 +33,11 @@ def _new_id() -> str:
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=_new_id)
     email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
     display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     auth_provider: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -48,6 +50,51 @@ class User(Base):
     chunks: Mapped[List["Chunk"]] = relationship(back_populates="user")
     queries: Mapped[List["Query"]] = relationship(back_populates="user")
     citations: Mapped[List["Citation"]] = relationship(back_populates="user")
+    refresh_sessions: Mapped[List["RefreshSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+    )
+
+
+class RefreshSession(Base):
+    __tablename__ = "refresh_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    user_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    token_hash: Mapped[bytes] = mapped_column(BINARY(32), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    replaced_by_session_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("refresh_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    user: Mapped["User"] = relationship(back_populates="refresh_sessions")
+    replaced_by: Mapped[Optional["RefreshSession"]] = relationship(
+        remote_side="RefreshSession.id",
+        foreign_keys=[replaced_by_session_id],
+    )
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_refresh_sessions_token_hash"),
+        Index("ix_refresh_sessions_expires_at", "expires_at"),
+        Index(
+            "ix_refresh_sessions_user_id_revoked_at_expires_at",
+            "user_id",
+            "revoked_at",
+            "expires_at",
+        ),
+    )
 
 
 class Document(Base):

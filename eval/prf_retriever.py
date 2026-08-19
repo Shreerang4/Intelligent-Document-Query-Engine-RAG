@@ -26,9 +26,6 @@ from typing import Any, Dict, List, Tuple
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-import os as _os
-_os.environ.setdefault("API_TOKEN", "eval-placeholder")
-
 # main is imported by pipeline_adapter before this module is loaded in the runner;
 # Python's module cache makes this a zero-cost lookup in the common case.
 import main as _pipeline

@@ -3,13 +3,18 @@ aiohttp==3.12.15
 aiosignal==1.4.0
 annotated-types==0.7.0
 anyio==4.9.0
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
 attrs==25.3.0
 certifi==2025.8.3
+cffi==2.1.1
 charset-normalizer==3.4.2
 click==8.2.1
 colorama==0.4.6
 dataclasses-json==0.6.7
 distro==1.9.0
+dnspython==2.8.0
+email-validator==2.3.0
 faiss-cpu>=1.12.0
 fastapi==0.116.1
 filelock==3.18.0
@@ -51,6 +56,8 @@ pydantic-settings==2.10.1
 pydantic_core==2.33.2
 PyMuPDF==1.26.3
 PyMySQL==1.1.1
+PyJWT==2.13.0
+pycparser==3.0
 python-dotenv==1.1.1
 python-multipart==0.0.20
 PyYAML==6.0.2

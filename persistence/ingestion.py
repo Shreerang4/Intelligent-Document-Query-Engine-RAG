@@ -8,7 +8,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from sqlalchemy import select
 
-from persistence.user_context import get_current_user_id
+from persistence.ownership import require_existing_user
 
 
 logger = logging.getLogger(__name__)
@@ -45,9 +45,10 @@ def _persist_ingested_document(
     k_final: int,
 ) -> Optional[str]:
     from persistence.db import SessionLocal
-    from persistence.models import Chunk, Document, User
+    from persistence.models import Chunk, Document
 
     with SessionLocal() as session:
+        require_existing_user(session, user_id)
         existing_document = session.execute(
             select(Document)
             .where(Document.user_id == user_id, Document.source_hash == source_hash)
@@ -55,9 +56,6 @@ def _persist_ingested_document(
         ).scalars().first()
         if existing_document is not None:
             return existing_document.id
-
-        if session.get(User, user_id) is None:
-            session.add(User(id=user_id))
 
         document = Document(
             user_id=user_id,
@@ -100,6 +98,7 @@ def _persist_ingested_document(
 
 def persist_ingested_document_best_effort(
     *,
+    user_id: str,
     source_type: str,
     chunks: Sequence[Mapping[str, Any]],
     filename: Optional[str] = None,
@@ -117,7 +116,7 @@ def persist_ingested_document_best_effort(
     try:
         source_hash = _compute_source_hash(pdf_bytes=pdf_bytes, source_url=source_url, cache_key=cache_key)
         return _persist_ingested_document(
-            user_id=get_current_user_id(),
+            user_id=user_id,
             source_type=source_type,
             chunks=chunks,
             filename=filename,
