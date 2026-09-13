@@ -90,6 +90,10 @@ flowchart TD
 - **Recovery:** uploads check user-scoped RAM first, then persisted MySQL chunks
   and embeddings, and only re-parse/re-embed on a full miss. A committed upload
   can also be recovered safely by its optional `request_id`.
+- **Queue-independent ingestion:** `ingest_document(document_id)` resolves the
+  private source object from MySQL, uses the same PDF cleaning/chunking and E5
+  implementation as synchronous routes, and atomically commits embeddings
+  before marking the document ready. No broker or worker is wired in yet.
 - **Browser security:** production uses an enforcing Content Security Policy and
   React's normal safe text rendering. The CSP contains neither `unsafe-inline`
   nor `unsafe-eval`; cookie-backed auth POSTs also enforce origin/referer checks.
@@ -141,6 +145,15 @@ Backend variables referenced by the code:
 | `DB_CA_CERT` | Local MySQL | none | Local path to the MySQL CA certificate for TLS verification. Do not commit this file. |
 | `DB_CA_CERT_B64` | HF MySQL | none | Base64-encoded CA certificate secret decoded at startup for Hugging Face deployment. |
 | `DB_ALLOW_LOCAL_TEST_CERT_HOSTNAME_MISMATCH` | Local disposable MySQL only | `false` | Keeps CA/signature validation but permits MySQL Community Server's auto-generated certificate without a hostname. Rejected unless the host is loopback and the database name identifies a test/disposable database. Never set in production. |
+| `OBJECT_STORAGE_BACKEND` | No | `local` | Private source-document storage backend: `local` or `s3`. Current routes do not write to it yet. |
+| `OBJECT_STORAGE_LOCAL_ROOT` | Local backend | `./uploads/object-storage` | Private filesystem root. Future API and worker processes must mount the same durable absolute path. |
+| `OBJECT_STORAGE_S3_ENDPOINT_URL` | S3-compatible provider | AWS default | Optional custom S3-compatible endpoint. |
+| `OBJECT_STORAGE_S3_BUCKET` | S3 backend | none | Required private bucket. Public access must be blocked by bucket/account policy. |
+| `OBJECT_STORAGE_S3_REGION` | S3 backend | provider default | Optional bucket region. |
+| `OBJECT_STORAGE_S3_ACCESS_KEY_ID` | S3 backend | boto3 provider chain | Optional explicit access key. Leave unset with the secret to use IAM roles, workload identity, or shared configuration. |
+| `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` | S3 backend | boto3 provider chain | Optional explicit secret; must accompany the explicit access key. |
+| `OBJECT_STORAGE_S3_SESSION_TOKEN` | S3 backend | none | Optional token for explicit temporary credentials. |
+| `OBJECT_STORAGE_S3_ADDRESSING_STYLE` | S3 backend | `auto` | S3 addressing style: `auto`, `path`, or `virtual`. |
 | `PORT` | No | `7860` | Uvicorn port used by `start.py`. |
 | `MAX_PDF_BYTES` | No | `15728640` | Maximum PDF size in bytes. |
 | `HTTP_TIMEOUT_SECONDS` | No | `30` | Timeout for PDF URL downloads. |
@@ -182,6 +195,13 @@ $env:DB_CA_CERT="certs/ca.pem"
 $env:PORT="7860"
 py start.py
 ```
+
+The storage-only foundation defaults to a private local directory. A future
+split API/worker deployment must configure the same absolute mounted path in
+both processes. For S3-compatible storage, configure a private bucket and the
+optional endpoint and region. Explicit credentials are optional; when absent,
+boto3 uses its standard credential provider chain. The code does not set object
+ACLs, construct public URLs, or expose object keys through the current API.
 
 Frontend:
 
@@ -347,7 +367,10 @@ Foreign keys and ownership-aware queries keep account data isolated.
 The idempotent MySQL migrations are retained in numeric order under
 `migrations/mysql/`. Migration 001 adds persisted embeddings and request
 recovery; migration 002 introduces the production multi-user authentication
-schema and cleans obsolete placeholder-era data. Both have dedicated guarded
+schema and cleans obsolete placeholder-era data. Migration 003 adds nullable
+private-object metadata. Migration 004 converts completed legacy `ingested`
+rows to `ready` and establishes `queued` as the default for future documents.
+The migrations have dedicated guarded
 rehearsal and real-MySQL integration coverage. New databases are initialized
 without seeded user identities. Schema details and verification queries live in
 [`docs/persistence_schema.md`](docs/persistence_schema.md); operational gates are

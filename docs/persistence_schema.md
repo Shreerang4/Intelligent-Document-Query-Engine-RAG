@@ -278,7 +278,10 @@ Stores one ingested PDF per user and the retrieval configuration used for it.
 - `user_id` references `users.id`
 - input metadata: `source_type`, `filename`, `source_url`, `source_hash`,
   `cache_key`
-- lifecycle fields: `status`, `error_message`
+- optional private-object metadata: `object_key`, `content_type`, `byte_size`;
+  legacy and URL documents may leave all three values NULL
+- lifecycle fields: `status` (`queued`, `processing`, `ready`, or `failed`) and
+  `error_message`; legacy `ingested` rows are converted to `ready`
 - retrieval config: `embedding_model`, `embedding_format`, `retrieval_mode`,
   `reranker_model`, `k_initial`, `k_final`
 - timestamps: `created_at`, `updated_at`
@@ -287,6 +290,11 @@ Indexes:
 
 - `documents(user_id, created_at)`
 - `documents(user_id, source_hash)` for persistent artifact lookup
+- unique `documents(object_key)`; nullable rows do not conflict
+
+Source-PDF keys use `documents/<document UUID>/source.pdf`. Original filenames
+and user identity are never included. The queue-independent ingestion service
+resolves this metadata by document ID; current browser routes do not invoke it.
 
 ### `chunks`
 
@@ -377,13 +385,15 @@ must apply the migrations in order:
 
 1. `migrations/mysql/001_persistent_embeddings_and_request_recovery.sql`
 2. `migrations/mysql/002_multi_user_auth.sql`
+3. `migrations/mysql/003_document_object_metadata.sql`
+4. `migrations/mysql/004_document_ingestion_lifecycle.sql`
 
 Migration 002 is intentionally destructive only for the legacy
 `local-dev-user`. It deletes citations, queries, chunks, documents, any refresh
 sessions, and finally the placeholder user in foreign-key-safe order. It does
 not delete rows owned by any other user.
 
-1. Back up the production database and apply both migrations to staging first.
+1. Back up the production database and apply all migrations to staging first.
 2. Connect with the MySQL client using Aiven's host, port, username, database,
    and CA certificate. Enter the password interactively.
 3. From the MySQL prompt, execute each required migration in numeric order:
@@ -391,6 +401,8 @@ not delete rows owned by any other user.
 ```sql
 SOURCE migrations/mysql/001_persistent_embeddings_and_request_recovery.sql;
 SOURCE migrations/mysql/002_multi_user_auth.sql;
+SOURCE migrations/mysql/003_document_object_metadata.sql;
+SOURCE migrations/mysql/004_document_ingestion_lifecycle.sql;
 ```
 
 4. Verify the result:
@@ -403,9 +415,14 @@ SHOW INDEX FROM queries WHERE Key_name = 'uq_queries_user_request_index';
 SHOW COLUMNS FROM users LIKE 'password_hash';
 SHOW INDEX FROM users WHERE Key_name = 'uq_users_email';
 SHOW CREATE TABLE refresh_sessions;
+SHOW COLUMNS FROM documents WHERE Field IN ('object_key', 'content_type', 'byte_size');
+SHOW INDEX FROM documents WHERE Key_name = 'uq_documents_object_key';
+SHOW COLUMNS FROM documents LIKE 'status';
+SELECT COUNT(*) FROM documents WHERE status = 'ingested';
 SELECT COUNT(*) FROM users WHERE id = 'local-dev-user';
 ```
 
-Both migrations are idempotent. Migration 002 checks `information_schema`
+All migrations are idempotent. Migration 002 checks `information_schema`
 before altering `users`, uses `CREATE TABLE IF NOT EXISTS` for refresh sessions,
-and can safely repeat the placeholder cleanup.
+and can safely repeat the placeholder cleanup. Migration 004's value update and
+default alteration are also safe to repeat.

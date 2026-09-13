@@ -123,6 +123,24 @@ used, not while importing the application. Missing configuration returns a safe
 cannot authenticate RAG/history endpoints. Conversely, a user JWT cannot access
 `/health/db`. Public `GET /health` remains independent of this token.
 
+### Private Object Storage Foundation
+
+The storage abstraction exists, but current RAG routes do not yet retain PDFs
+through it. Before enabling the future asynchronous upload path:
+
+- With `OBJECT_STORAGE_BACKEND=local`, use an absolute durable path outside
+  publicly served directories and mount the same contents into API and worker
+  processes.
+- With `OBJECT_STORAGE_BACKEND=s3`, enforce private access using the provider's
+  public-access controls and bucket/account policy. The application sends no
+  object ACL, never requests `public-read`, and constructs no public URL.
+- Store explicit S3 credentials as secrets. If they are absent, boto3 uses its
+  standard provider chain, allowing IAM roles and workload identity.
+- Grant the runtime principal only the required object-prefix get/put/delete
+  permissions. Database backups contain metadata, not the PDF bytes.
+- Source PDFs are intended to remain available for a later authenticated,
+  short-lived signed-URL flow. No viewing or signed-URL endpoint exists yet.
+
 ## Accepted Account-State Staleness
 
 Normal RAG/history requests use `get_authenticated_user_id()`. This validates
@@ -176,5 +194,10 @@ Before production rollout:
 3. Confirm production environment variables without printing their values.
 4. Verify InnoDB engines and MySQL TLS with read-only queries.
 5. Apply migration 002 under a separately approved change window.
-6. Perform staging registration, login, refresh, logout, upload, URL query, and
+6. Apply migration 003 before enabling any route that persists object metadata.
+7. Apply migration 004 before invoking queue-independent ingestion so completed
+   legacy rows use `ready` and newly created rows default to `queued`.
+8. Verify the object bucket or mounted directory is private and durable from
+   every process that will use it.
+9. Perform staging registration, login, refresh, logout, upload, URL query, and
    two-user ownership smoke tests before deployment.

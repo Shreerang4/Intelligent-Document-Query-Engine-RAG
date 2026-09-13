@@ -8,6 +8,7 @@ from typing import Any, List, Optional
 
 from sqlalchemy import (
     BINARY,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -107,7 +108,15 @@ class Document(Base):
     source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     source_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     cache_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="processing")
+    object_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    content_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    byte_size: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="queued",
+        server_default="queued",
+    )
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
     embedding_format: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -131,6 +140,7 @@ class Document(Base):
     __table_args__ = (
         Index("ix_documents_user_id_created_at", "user_id", "created_at"),
         Index("ix_documents_user_id_source_hash", "user_id", "source_hash"),
+        UniqueConstraint("object_key", name="uq_documents_object_key"),
     )
 
 

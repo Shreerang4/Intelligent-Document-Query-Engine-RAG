@@ -91,7 +91,7 @@ def persist_upload_result_atomic(
                         filename=filename,
                         source_hash=source_hash,
                         cache_key=cache_key,
-                        status="ingested",
+                        status="ready",
                         embedding_model=embedding_model,
                         embedding_format=embedding_format,
                         retrieval_mode=retrieval_mode,
@@ -154,6 +154,9 @@ def persist_upload_result_atomic(
                         session.flush()
                     if len(chunk_rows) != len(chunks):
                         raise ArtifactValidationError("Persisted chunk count does not match the request artifact.")
+
+                document.status = "ready"
+                document.error_message = None
 
                 chunk_by_id = {int(chunk.chunk_id): chunk for chunk in chunk_rows}
                 query_rows = []

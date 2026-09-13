@@ -64,7 +64,7 @@ def _persist_ingested_document(
             source_url=source_url,
             source_hash=source_hash,
             cache_key=cache_key,
-            status="ingested",
+            status="ready",
             embedding_model=embedding_model,
             embedding_format=embedding_format,
             retrieval_mode=retrieval_mode,

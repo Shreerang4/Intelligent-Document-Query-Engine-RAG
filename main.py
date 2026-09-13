@@ -7,15 +7,13 @@ import math
 import os
 import re
 import time
-import unicodedata
 import uuid
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
 
 import faiss
-import fitz
 import httpx
 import numpy as np
 from dotenv import load_dotenv
@@ -24,7 +22,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from groq import Groq
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
 
 from backend.app.schemas import (
@@ -46,6 +43,28 @@ from backend.app.auth.config import get_auth_allowed_origins
 from backend.app.auth.dependencies import get_authenticated_user_id
 from backend.app.auth.http_errors import install_auth_http_error_handlers
 from backend.app.security_headers import install_security_headers
+from backend.app.rag.config import (
+    DEFAULT_EMBEDDING_MODEL_NAME as SHARED_EMBEDDING_MODEL_NAME,
+    DEFAULT_MAX_PDF_BYTES as SHARED_MAX_PDF_BYTES,
+    get_embedding_model_name as shared_get_embedding_model_name,
+    get_max_pdf_bytes as shared_get_max_pdf_bytes,
+)
+from backend.app.rag.embeddings import (
+    create_chunk_embeddings as shared_create_chunk_embeddings,
+    format_documents_for_embedding as shared_format_documents_for_embedding,
+    format_query_for_embedding as shared_format_query_for_embedding,
+    get_embedding_input_format_version as shared_get_embedding_input_format_version,
+    get_embedding_model as shared_get_embedding_model,
+    uses_e5_embedding_format as shared_uses_e5_embedding_format,
+)
+from backend.app.rag.ingestion import (
+    ChunkRecord,
+    InvalidPdfError,
+    NoMeaningfulTextError,
+    PdfTooLargeError,
+    ascii_normalize,
+    parse_and_chunk_pdf_bytes,
+)
 from persistence.document_artifacts import (
     ArtifactValidationError,
     StoredDocumentArtifacts,
@@ -84,12 +103,6 @@ FRONTEND_INDEX_FILE = FRONTEND_DIST_DIR / 'index.html'
 FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / 'assets'
 
 
-class ChunkRecord(TypedDict):
-    text: str
-    page: int
-    chunk_id: int
-
-
 app = FastAPI(title="Intelligent Document Query Engine", version="2.3.0")
 install_auth_http_error_handlers(app)
 install_security_headers(app)
@@ -105,14 +118,14 @@ app.include_router(auth_router)
 model_cache: Dict[str, object] = {}
 HISTORY_MAX_LIMIT = 100
 MAX_QUESTIONS_PER_REQUEST = 10
-MAX_PDF_BYTES = 15728640
+MAX_PDF_BYTES = SHARED_MAX_PDF_BYTES
 HTTP_TIMEOUT_SECONDS = 30
 RETRIEVAL_K_INITIAL = 20
 RETRIEVAL_K_FINAL = 8
 MAX_CONCURRENT_QUESTIONS = 4
 DOCUMENT_CACHE_MAX_ITEMS = 8
 DOCUMENT_CACHE_TTL_SECONDS = 3600
-EMBEDDING_MODEL_NAME = "intfloat/e5-small-v2"
+EMBEDDING_MODEL_NAME = SHARED_EMBEDDING_MODEL_NAME
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
 RETRIEVAL_MODE = "faiss_reranker"
 HYBRID_E5_K_INITIAL = 30
@@ -122,7 +135,6 @@ LLM_MODEL_NAME = "openai/gpt-oss-20b"
 MAX_CLAIMS_PER_ANSWER = 5
 CLAIM_VERIFICATION_K_FINAL = 3
 CLAIM_VERIFICATION_FAILURE_MESSAGE = "Verification failed or evidence was insufficient."
-TEXT_SPLITTER = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 _invalid_int_settings_warnings: set[tuple[str, str]] = set()
 SourceModelT = TypeVar("SourceModelT", bound=BaseModel)
 CLAIM_VERDICTS = {"supported", "weakly_supported", "unsupported"}
@@ -194,7 +206,7 @@ def _get_str_setting(name: str, default: str) -> str:
 
 
 def get_max_pdf_bytes() -> int:
-    return _get_int_setting("MAX_PDF_BYTES", MAX_PDF_BYTES, min_value=1)
+    return shared_get_max_pdf_bytes()
 
 
 def get_http_timeout_seconds() -> int:
@@ -241,34 +253,24 @@ def get_document_cache_ttl_seconds() -> int:
 
 
 def get_embedding_model_name() -> str:
-    return _get_str_setting("EMBEDDING_MODEL_NAME", EMBEDDING_MODEL_NAME)
+    return shared_get_embedding_model_name()
 
 
 def uses_e5_embedding_format(model_name: Optional[str] = None) -> bool:
     """Return True when the selected embedder expects E5 query/passage prefixes."""
-    selected_model = (model_name or get_embedding_model_name()).strip().lower()
-    return (
-        selected_model.startswith("intfloat/e5-")
-        or selected_model.startswith("intfloat/multilingual-e5-")
-        or "/e5-" in selected_model
-        or "/multilingual-e5-" in selected_model
-    )
+    return shared_uses_e5_embedding_format(model_name)
 
 
 def get_embedding_input_format_version(model_name: Optional[str] = None) -> str:
-    return "e5-query-passage-v1" if uses_e5_embedding_format(model_name) else "raw-v1"
+    return shared_get_embedding_input_format_version(model_name)
 
 
 def _format_documents_for_embedding(texts: List[str], model_name: Optional[str] = None) -> List[str]:
-    if uses_e5_embedding_format(model_name):
-        return [f"passage: {text}" for text in texts]
-    return texts
+    return shared_format_documents_for_embedding(texts, model_name)
 
 
 def _format_query_for_embedding(question: str, model_name: Optional[str] = None) -> str:
-    if uses_e5_embedding_format(model_name):
-        return f"query: {question}"
-    return question
+    return shared_format_query_for_embedding(question, model_name)
 
 
 def _embedding_cache_namespace() -> str:
@@ -290,14 +292,7 @@ def get_llm_model_name() -> str:
 
 
 def get_embedding_model() -> Any:
-    model_name = get_embedding_model_name()
-    cache_key = f"embedding_model:{model_name}"
-    if cache_key not in model_cache:
-        logger.info("Loading embedding model: %s", model_name)
-        from langchain_huggingface import HuggingFaceEmbeddings
-
-        model_cache[cache_key] = HuggingFaceEmbeddings(model_name=model_name)
-    return model_cache[cache_key]
+    return shared_get_embedding_model(model_cache)
 
 
 def get_reranker_model() -> Any:
@@ -606,79 +601,7 @@ def _is_supported_pdf_upload(file: UploadFile) -> bool:
 
 
 def _ascii_normalize(text: str) -> str:
-    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
-
-
-def _is_board_coordinate_line(line: str) -> bool:
-    compact = " ".join(line.lower().split())
-    if re.fullmatch(r"(?:[a-h](?:\s+[a-h]){3,7})", compact):
-        return True
-    if re.fullmatch(r"(?:[1-8](?:\s+[1-8]){0,7})", compact):
-        return True
-    return False
-
-
-def _line_has_language_content(line: str) -> bool:
-    non_space = sum(1 for char in line if not char.isspace())
-    alpha_chars = sum(1 for char in line if char.isalpha())
-
-    if non_space == 0:
-        return False
-    if alpha_chars == 0:
-        return False
-    if alpha_chars < 2 and non_space < 12:
-        return False
-    if alpha_chars / max(non_space, 1) < 0.18 and alpha_chars < 12:
-        return False
-    return True
-
-
-def _clean_extracted_line(line: str) -> str:
-    cleaned = _ascii_normalize(line)
-    cleaned = re.sub(r"[^\x20-\x7E]", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    if not cleaned:
-        return ""
-    if _is_board_coordinate_line(cleaned):
-        return ""
-    if re.fullmatch(r"[1-8]", cleaned):
-        return ""
-    if not _line_has_language_content(cleaned):
-        return ""
-
-    return cleaned
-
-
-def _clean_extracted_page_text(page_text: str) -> str:
-    cleaned_lines: List[str] = []
-    previous_line = ""
-
-    for raw_line in page_text.splitlines():
-        cleaned_line = _clean_extracted_line(raw_line)
-        if not cleaned_line:
-            continue
-        if cleaned_line == previous_line:
-            continue
-        cleaned_lines.append(cleaned_line)
-        previous_line = cleaned_line
-
-    return "\n".join(cleaned_lines).strip()
-
-
-def _is_low_quality_chunk(text: str) -> bool:
-    non_space = sum(1 for char in text if not char.isspace())
-    alpha_chars = sum(1 for char in text if char.isalpha())
-
-    if non_space == 0:
-        return True
-    if alpha_chars == 0:
-        return True
-    if len(text) < 30 and alpha_chars < 12:
-        return True
-    if alpha_chars / max(non_space, 1) < 0.22 and alpha_chars < 80:
-        return True
-    return False
+    return ascii_normalize(text)
 
 
 def _clean_generated_answer_text(text: str) -> str:
@@ -691,44 +614,14 @@ def _clean_generated_answer_text(text: str) -> str:
 
 def load_and_chunk_pdf_bytes(pdf_bytes: bytes) -> List[ChunkRecord]:
     """Split PDF bytes into page-aware text chunks."""
-    if len(pdf_bytes) > get_max_pdf_bytes():
-        raise HTTPException(status_code=400, detail="PDF exceeds maximum allowed size.")
-
-    chunk_records: List[ChunkRecord] = []
-    chunk_id = 0
-
     try:
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
-            for page_number, page in enumerate(document, start=1):
-                raw_page_text = page.get_text("text")
-                page_text = _clean_extracted_page_text(raw_page_text)
-                if not page_text or not page_text.strip():
-                    continue
-
-                for chunk_text in TEXT_SPLITTER.split_text(page_text):
-                    normalized_text = chunk_text.strip()
-                    if not normalized_text:
-                        continue
-                    if _is_low_quality_chunk(normalized_text):
-                        continue
-                    chunk_records.append(
-                        {
-                            "text": normalized_text,
-                            "page": page_number,
-                            "chunk_id": chunk_id,
-                        }
-                    )
-                    chunk_id += 1
-    except HTTPException:
-        raise
-    except Exception as exc:
+        return parse_and_chunk_pdf_bytes(pdf_bytes)
+    except PdfTooLargeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InvalidPdfError as exc:
         raise HTTPException(status_code=422, detail="Failed to parse PDF document.") from exc
-
-    if not chunk_records:
-        raise HTTPException(status_code=422, detail="No meaningful text found in the PDF.")
-
-    logger.info("Document parsed into %s chunks.", len(chunk_records))
-    return chunk_records
+    except NoMeaningfulTextError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 async def load_and_chunk_pdf(url: str) -> List[ChunkRecord]:
@@ -764,18 +657,7 @@ def create_chunk_embeddings(
     """Create one contiguous float32 embedding row per chunk."""
     if not chunks:
         raise HTTPException(status_code=400, detail="No text chunks to process.")
-
-    model_name = get_embedding_model_name()
-    chunk_texts = _format_documents_for_embedding([chunk["text"] for chunk in chunks], model_name)
-    chunk_embeddings = embedding_model.embed_documents(chunk_texts)
-    embedding_array = np.asarray(chunk_embeddings, dtype=np.float32)
-    if (
-        embedding_array.ndim != 2
-        or embedding_array.shape[0] != len(chunks)
-        or embedding_array.shape[1] == 0
-    ):
-        raise RuntimeError("Embedding model returned an invalid chunk embedding matrix.")
-    return np.ascontiguousarray(embedding_array, dtype=np.float32)
+    return shared_create_chunk_embeddings(chunks, embedding_model)
 
 
 def build_faiss_index(embedding_array: np.ndarray) -> faiss.IndexFlatL2:
