@@ -39,6 +39,7 @@ from backend.app.schemas import (
     SourceReference,
 )
 from backend.app.auth.router import router as auth_router
+from backend.app.documents.router import router as documents_router
 from backend.app.auth.config import get_auth_allowed_origins
 from backend.app.auth.dependencies import get_authenticated_user_id
 from backend.app.auth.http_errors import install_auth_http_error_handlers
@@ -48,6 +49,10 @@ from backend.app.rag.config import (
     DEFAULT_MAX_PDF_BYTES as SHARED_MAX_PDF_BYTES,
     get_embedding_model_name as shared_get_embedding_model_name,
     get_max_pdf_bytes as shared_get_max_pdf_bytes,
+    get_reranker_model_name as shared_get_reranker_model_name,
+    get_retrieval_k_final as shared_get_retrieval_k_final,
+    get_retrieval_k_initial as shared_get_retrieval_k_initial,
+    get_retrieval_mode as shared_get_retrieval_mode,
 )
 from backend.app.rag.embeddings import (
     create_chunk_embeddings as shared_create_chunk_embeddings,
@@ -70,6 +75,7 @@ from persistence.document_artifacts import (
     StoredDocumentArtifacts,
     load_document_artifacts,
     load_or_backfill_document_embeddings,
+    load_owned_document_query_artifacts,
 )
 from persistence.ingestion import persist_ingested_document_best_effort
 from persistence.history import (
@@ -114,20 +120,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(auth_router)
+app.include_router(documents_router)
 
 model_cache: Dict[str, object] = {}
 HISTORY_MAX_LIMIT = 100
 MAX_QUESTIONS_PER_REQUEST = 10
 MAX_PDF_BYTES = SHARED_MAX_PDF_BYTES
 HTTP_TIMEOUT_SECONDS = 30
-RETRIEVAL_K_INITIAL = 20
-RETRIEVAL_K_FINAL = 8
 MAX_CONCURRENT_QUESTIONS = 4
 DOCUMENT_CACHE_MAX_ITEMS = 8
 DOCUMENT_CACHE_TTL_SECONDS = 3600
 EMBEDDING_MODEL_NAME = SHARED_EMBEDDING_MODEL_NAME
-RERANKER_MODEL_NAME = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
-RETRIEVAL_MODE = "faiss_reranker"
 HYBRID_E5_K_INITIAL = 30
 HYBRID_BM25_K_INITIAL = 20
 HYBRID_K_FINAL = 5
@@ -214,18 +217,15 @@ def get_http_timeout_seconds() -> int:
 
 
 def get_retrieval_k_initial() -> int:
-    return _get_int_setting("RETRIEVAL_K_INITIAL", RETRIEVAL_K_INITIAL, min_value=1)
+    return shared_get_retrieval_k_initial()
 
 
 def get_retrieval_k_final() -> int:
-    return _get_int_setting("RETRIEVAL_K_FINAL", RETRIEVAL_K_FINAL, min_value=1)
+    return shared_get_retrieval_k_final()
 
 
 def get_retrieval_mode() -> str:
-    mode = _get_str_setting("RETRIEVAL_MODE", RETRIEVAL_MODE).strip().lower()
-    if mode == "e5":
-        return "faiss_reranker"
-    return mode
+    return shared_get_retrieval_mode()
 
 
 def get_hybrid_e5_k_initial() -> int:
@@ -284,7 +284,7 @@ def _embedding_cache_namespace() -> str:
 
 
 def get_reranker_model_name() -> str:
-    return _get_str_setting("RERANKER_MODEL_NAME", RERANKER_MODEL_NAME)
+    return shared_get_reranker_model_name()
 
 
 def get_llm_model_name() -> str:
@@ -1361,6 +1361,45 @@ async def _run_questions(
 
     answers = await asyncio.gather(*(run_with_limit(question) for question in questions))
     return QueryResponse(answers=list(answers))
+
+
+async def query_ready_document(
+    *, document_id: str, question: str, user_id: str,
+    response: Response, background_tasks: BackgroundTasks,
+) -> QueryResponse:
+    """Use stored vectors and the existing question pipeline for an owned document."""
+    cache_key = _owned_document_cache_key(
+        user_id, f"document:{_embedding_cache_namespace()}:{document_id}"
+    )
+    cache_entry = _get_document_cache_entry(user_id=user_id, cache_key=cache_key)
+    if cache_entry is None:
+        artifacts = await asyncio.to_thread(
+            load_owned_document_query_artifacts,
+            user_id=user_id,
+            document_id=document_id,
+            embedding_model=get_embedding_model_name(),
+            embedding_format=get_embedding_input_format_version(),
+        )
+        chunks = artifacts.chunks
+        faiss_index = await asyncio.to_thread(build_faiss_index, artifacts.embedding_matrix)
+        _set_document_cache_entry(
+            user_id, cache_key, chunks, faiss_index, document_id=document_id
+        )
+        _set_cache_headers(response, "MISS")
+    else:
+        chunks, faiss_index = cache_entry.chunks, cache_entry.faiss_index
+        _set_cache_headers(response, "HIT")
+
+    embedding_model = await asyncio.to_thread(get_embedding_model)
+    reranker = await asyncio.to_thread(get_reranker_model)
+    groq_client = await asyncio.to_thread(get_groq_client)
+    result = await _run_questions(
+        [question], faiss_index, chunks, embedding_model, reranker, groq_client,
+        user_id=user_id, document_id=document_id, background_tasks=background_tasks,
+    )
+    if result.answers[0].status == "error":
+        raise HTTPException(status_code=503, detail="Document query is unavailable.")
+    return result
 
 
 @app.post("/hackrx/run", response_model=QueryResponse)

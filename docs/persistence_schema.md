@@ -280,6 +280,8 @@ Stores one ingested PDF per user and the retrieval configuration used for it.
   `cache_key`
 - optional private-object metadata: `object_key`, `content_type`, `byte_size`;
   legacy and URL documents may leave all three values NULL
+- optional async-upload retry identity: `upload_request_id`; browser clients
+  should always supply one even though the API currently permits omission
 - lifecycle fields: `status` (`queued`, `processing`, `ready`, or `failed`) and
   `error_message`; legacy `ingested` rows are converted to `ready`
 - retrieval config: `embedding_model`, `embedding_format`, `retrieval_mode`,
@@ -291,10 +293,14 @@ Indexes:
 - `documents(user_id, created_at)`
 - `documents(user_id, source_hash)` for persistent artifact lookup
 - unique `documents(object_key)`; nullable rows do not conflict
+- unique `documents(user_id, upload_request_id)`; request UUIDs are isolated by
+  owner and existing NULL values do not conflict
 
 Source-PDF keys use `documents/<document UUID>/source.pdf`. Original filenames
 and user identity are never included. The queue-independent ingestion service
-resolves this metadata by document ID; current browser routes do not invoke it.
+resolves this metadata by document ID. The asynchronous `/documents/upload`
+route writes the metadata before publishing the document ID; it does not parse,
+chunk, or embed the PDF. The synchronous `/hackrx/*` routes remain unchanged.
 
 ### `chunks`
 
@@ -387,6 +393,7 @@ must apply the migrations in order:
 2. `migrations/mysql/002_multi_user_auth.sql`
 3. `migrations/mysql/003_document_object_metadata.sql`
 4. `migrations/mysql/004_document_ingestion_lifecycle.sql`
+5. `migrations/mysql/005_document_upload_idempotency.sql`
 
 Migration 002 is intentionally destructive only for the legacy
 `local-dev-user`. It deletes citations, queries, chunks, documents, any refresh
@@ -403,6 +410,7 @@ SOURCE migrations/mysql/001_persistent_embeddings_and_request_recovery.sql;
 SOURCE migrations/mysql/002_multi_user_auth.sql;
 SOURCE migrations/mysql/003_document_object_metadata.sql;
 SOURCE migrations/mysql/004_document_ingestion_lifecycle.sql;
+SOURCE migrations/mysql/005_document_upload_idempotency.sql;
 ```
 
 4. Verify the result:
@@ -418,6 +426,8 @@ SHOW CREATE TABLE refresh_sessions;
 SHOW COLUMNS FROM documents WHERE Field IN ('object_key', 'content_type', 'byte_size');
 SHOW INDEX FROM documents WHERE Key_name = 'uq_documents_object_key';
 SHOW COLUMNS FROM documents LIKE 'status';
+SHOW COLUMNS FROM documents LIKE 'upload_request_id';
+SHOW INDEX FROM documents WHERE Key_name = 'uq_documents_user_upload_request_id';
 SELECT COUNT(*) FROM documents WHERE status = 'ingested';
 SELECT COUNT(*) FROM users WHERE id = 'local-dev-user';
 ```
@@ -426,3 +436,5 @@ All migrations are idempotent. Migration 002 checks `information_schema`
 before altering `users`, uses `CREATE TABLE IF NOT EXISTS` for refresh sessions,
 and can safely repeat the placeholder cleanup. Migration 004's value update and
 default alteration are also safe to repeat.
+Migration 005 uses a nullable column and an owned unique index, so existing
+documents remain unaffected and different users may reuse the same request UUID.

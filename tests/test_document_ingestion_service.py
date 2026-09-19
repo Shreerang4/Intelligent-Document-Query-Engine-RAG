@@ -19,8 +19,11 @@ from backend.app.rag.ingestion import (
     parse_and_chunk_pdf_bytes,
 )
 from backend.app.services.document_ingestion import (
+    RETRY_EXHAUSTED_FAILURE_MESSAGE,
     RetryableDocumentIngestionError,
+    finalize_document_ingestion_retry_exhaustion,
     ingest_document,
+    prepare_document_ingestion_retry,
 )
 from backend.app.storage import ObjectNotFoundError, document_pdf_object_key
 from persistence.db import Base
@@ -31,6 +34,7 @@ from persistence.document_ingestion import (
     DOCUMENT_STATUS_QUEUED,
     DOCUMENT_STATUS_READY,
     mark_document_ingestion_failed,
+    mark_document_ingestion_queued_for_retry,
     persist_document_ingestion_atomic,
 )
 from persistence.models import Chunk, Document, User
@@ -307,6 +311,75 @@ def test_later_duplicate_failure_cannot_overwrite_ready(session_factory) -> None
         assert len(session.scalars(select(Chunk).where(Chunk.document_id == document_id)).all()) == 2
 
 
+def test_retry_countdown_state_moves_processing_back_to_queued(session_factory) -> None:
+    _, document_id, _ = _add_document(
+        session_factory,
+        status=DOCUMENT_STATUS_PROCESSING,
+    )
+
+    result = prepare_document_ingestion_retry(document_id)
+
+    assert result.status == DOCUMENT_STATUS_QUEUED
+    with session_factory() as session:
+        document = session.get(Document, document_id)
+        assert document.status == DOCUMENT_STATUS_QUEUED
+        assert document.error_message is None
+
+
+def test_retry_countdown_state_cannot_overwrite_ready(session_factory) -> None:
+    _, document_id, _ = _add_document(
+        session_factory,
+        status=DOCUMENT_STATUS_PROCESSING,
+    )
+    persist_document_ingestion_atomic(
+        document_id=document_id,
+        chunks=CHUNKS,
+        embedding_matrix=MATRIX,
+        embedding_model="intfloat/e5-small-v2",
+        embedding_format="e5-query-passage-v1",
+    )
+
+    result = mark_document_ingestion_queued_for_retry(document_id=document_id)
+
+    assert result.status == DOCUMENT_STATUS_READY
+    assert result.chunk_count == 2
+    with session_factory() as session:
+        document = session.get(Document, document_id)
+        assert document.status == DOCUMENT_STATUS_READY
+
+
+def test_exhausted_retry_finalizer_is_sanitized_and_ready_safe(session_factory) -> None:
+    _, failed_document_id, _ = _add_document(
+        session_factory,
+        status=DOCUMENT_STATUS_PROCESSING,
+    )
+    failed = finalize_document_ingestion_retry_exhaustion(failed_document_id)
+    assert failed.status == DOCUMENT_STATUS_FAILED
+    with session_factory() as session:
+        document = session.get(Document, failed_document_id)
+        assert document.error_message == RETRY_EXHAUSTED_FAILURE_MESSAGE
+
+    _, ready_document_id, _ = _add_document(
+        session_factory,
+        status=DOCUMENT_STATUS_PROCESSING,
+    )
+    persist_document_ingestion_atomic(
+        document_id=ready_document_id,
+        chunks=CHUNKS,
+        embedding_matrix=MATRIX,
+        embedding_model="intfloat/e5-small-v2",
+        embedding_format="e5-query-passage-v1",
+    )
+
+    losing_finalizer = finalize_document_ingestion_retry_exhaustion(ready_document_id)
+
+    assert losing_finalizer.status == DOCUMENT_STATUS_READY
+    with session_factory() as session:
+        document = session.get(Document, ready_document_id)
+        assert document.status == DOCUMENT_STATUS_READY
+        assert document.error_message is None
+
+
 def test_failed_finalization_rolls_back_chunk_replacement_and_status(
     session_factory,
     monkeypatch,
@@ -411,3 +484,23 @@ def test_shared_pdf_parser_classifies_invalid_and_empty_documents() -> None:
     empty_document.close()
     with pytest.raises(NoMeaningfulTextError):
         parse_and_chunk_pdf_bytes(empty_pdf)
+
+
+def test_synchronous_retrieval_configuration_delegates_to_shared_settings(monkeypatch) -> None:
+    monkeypatch.setenv("RETRIEVAL_K_INITIAL", "13")
+    monkeypatch.setenv("RETRIEVAL_K_FINAL", "4")
+    monkeypatch.setenv("RETRIEVAL_MODE", "e5")
+    monkeypatch.setenv("RERANKER_MODEL_NAME", "cross-encoder/shared-test")
+
+    assert main.get_retrieval_k_initial() == 13
+    assert main.get_retrieval_k_final() == 4
+    assert main.get_retrieval_mode() == "faiss_reranker"
+    assert main.get_reranker_model_name() == "cross-encoder/shared-test"
+
+    monkeypatch.setenv("RETRIEVAL_MODE", "")
+    monkeypatch.setenv("RERANKER_MODEL_NAME", "")
+    assert main.get_retrieval_mode() == "faiss_reranker"
+    assert (
+        main.get_reranker_model_name()
+        == "cross-encoder/ms-marco-TinyBERT-L-2-v2"
+    )

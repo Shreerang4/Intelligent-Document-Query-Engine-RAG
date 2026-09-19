@@ -7,6 +7,11 @@ from backend.app.schemas.history import (
     HistoryQueriesResponse,
     HistoryQueryItem,
 )
+from backend.app.schemas.documents import (
+    DocumentStatusResponse,
+    DocumentUploadResponse,
+    DocumentUploadUnavailableResponse,
+)
 from backend.app.schemas.query import (
     AnswerItem,
     ClaimVerificationItem,
@@ -21,6 +26,9 @@ __all__ = [
     "AuthResponse",
     "ClaimVerificationItem",
     "ClaimVerificationSource",
+    "DocumentStatusResponse",
+    "DocumentUploadResponse",
+    "DocumentUploadUnavailableResponse",
     "HistoryCitationItem",
     "HistoryCitationsResponse",
     "HistoryDocumentItem",

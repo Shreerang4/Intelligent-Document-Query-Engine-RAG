@@ -74,6 +74,37 @@ def embedding_matrix_from_chunk_rows(chunk_rows: Sequence[Any]) -> np.ndarray:
     return matrix
 
 
+def load_owned_document_query_artifacts(
+    *, user_id: str, document_id: str, embedding_model: str, embedding_format: str,
+) -> StoredDocumentArtifacts:
+    """Load ready, owned chunks and stored vectors without embedding backfill."""
+    from persistence.db import SessionLocal
+    from persistence.models import Chunk
+    from persistence.ownership import require_owned_document
+
+    with SessionLocal() as session:
+        document = require_owned_document(session, user_id=user_id, document_id=document_id)
+        if document.status != "ready":
+            raise ArtifactValidationError("Document is not ready for querying.")
+        if document.embedding_model != embedding_model or document.embedding_format != embedding_format:
+            raise ArtifactValidationError("Stored embeddings do not match the configured model.")
+        rows = session.execute(
+            select(Chunk)
+            .where(Chunk.user_id == user_id, Chunk.document_id == document_id)
+            .order_by(Chunk.chunk_index.asc())
+        ).scalars().all()
+        matrix = embedding_matrix_from_chunk_rows(rows)
+        return StoredDocumentArtifacts(
+            document_id=document_id,
+            chunks=[
+                {"text": row.text, "page": int(row.page_number), "chunk_id": int(row.chunk_id)}
+                for row in rows
+            ],
+            embedding_matrix=matrix,
+            needs_embedding_backfill=False,
+        )
+
+
 def load_document_artifacts(
     *,
     user_id: str,

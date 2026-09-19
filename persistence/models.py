@@ -111,6 +111,7 @@ class Document(Base):
     object_key: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     content_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     byte_size: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    upload_request_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
@@ -141,6 +142,11 @@ class Document(Base):
         Index("ix_documents_user_id_created_at", "user_id", "created_at"),
         Index("ix_documents_user_id_source_hash", "user_id", "source_hash"),
         UniqueConstraint("object_key", name="uq_documents_object_key"),
+        UniqueConstraint(
+            "user_id",
+            "upload_request_id",
+            name="uq_documents_user_upload_request_id",
+        ),
     )
 
 

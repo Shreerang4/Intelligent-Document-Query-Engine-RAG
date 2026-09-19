@@ -12,6 +12,10 @@ DEFAULT_MAX_PDF_BYTES = 15_728_640
 DEFAULT_EMBEDDING_MODEL_NAME = "intfloat/e5-small-v2"
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
+DEFAULT_RETRIEVAL_K_INITIAL = 20
+DEFAULT_RETRIEVAL_K_FINAL = 8
+DEFAULT_RETRIEVAL_MODE = "faiss_reranker"
+DEFAULT_RERANKER_MODEL_NAME = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
 _invalid_integer_warnings: set[tuple[str, str]] = set()
 
 
@@ -46,3 +50,20 @@ def get_chunk_size() -> int:
 
 def get_chunk_overlap() -> int:
     return DEFAULT_CHUNK_OVERLAP
+
+
+def get_retrieval_k_initial() -> int:
+    return _positive_integer_setting("RETRIEVAL_K_INITIAL", DEFAULT_RETRIEVAL_K_INITIAL)
+
+
+def get_retrieval_k_final() -> int:
+    return _positive_integer_setting("RETRIEVAL_K_FINAL", DEFAULT_RETRIEVAL_K_FINAL)
+
+
+def get_retrieval_mode() -> str:
+    selected = (os.getenv("RETRIEVAL_MODE") or DEFAULT_RETRIEVAL_MODE).strip().lower()
+    return "faiss_reranker" if selected == "e5" else selected
+
+
+def get_reranker_model_name() -> str:
+    return os.getenv("RERANKER_MODEL_NAME") or DEFAULT_RERANKER_MODEL_NAME

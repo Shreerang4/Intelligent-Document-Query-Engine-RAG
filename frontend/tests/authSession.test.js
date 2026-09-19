@@ -438,23 +438,27 @@ test('auth implementation contains no persistent token storage or refresh-cookie
   assert.doesNotMatch(combined, /document\.cookie/i);
   assert.doesNotMatch(combined, /console\.(?:log|debug|info|warn|error)/);
   assert.doesNotMatch(combined, /dangerouslySetInnerHTML/);
-  assert.doesNotMatch(combined, /BroadcastChannel|setTimeout|setInterval/);
+  assert.doesNotMatch(sources.slice(0, 3).join('\n'), /BroadcastChannel|setTimeout|setInterval/);
 });
 
-test('React RAG and history callers use authenticatedFetch with no manual token UI', async () => {
-  const [appSource, clientSource] = await Promise.all([
+test('React RAG and document callers use authenticatedFetch with no manual token UI', async () => {
+  const [appSource, clientSource, documentSource] = await Promise.all([
     readFile(new URL('../src/App.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/api/client.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/api/documentWorkflow.js', import.meta.url), 'utf8'),
   ]);
-  const combined = `${appSource}\n${clientSource}`;
+  const combined = `${appSource}\n${clientSource}\n${documentSource}`;
 
   for (const path of [
     '/hackrx/run',
-    '/hackrx/upload-run',
     '/history/documents',
   ]) {
     assert.match(appSource, new RegExp(`authenticatedFetch\\(['\"]${path.replace('/', '\\/')}`));
   }
+  assert.match(documentSource, /authenticatedFetch\('\/documents\/upload'/);
+  assert.match(documentSource, /authenticatedFetch\(\s*`\/documents\/\$\{encodeURIComponent\(documentId\)\}`/);
+  assert.match(documentSource, /\/queries`/);
+  assert.doesNotMatch(appSource, /\/hackrx\/upload-run/);
   assert.doesNotMatch(combined, /legacyRagApiFetch/);
   assert.doesNotMatch(combined, /API_TOKEN|API token|shared token/i);
   assert.doesNotMatch(appSource, /setToken|showToken|legacy-token-field|token-row/);

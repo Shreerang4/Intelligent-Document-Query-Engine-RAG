@@ -22,6 +22,7 @@ from persistence.document_ingestion import (
     DocumentIngestionNotFoundError,
     DocumentIngestionStateError,
     mark_document_ingestion_failed,
+    mark_document_ingestion_queued_for_retry,
     persist_document_ingestion_atomic,
     start_document_ingestion,
 )
@@ -36,6 +37,11 @@ class DocumentIngestionResult:
     document_id: str
     status: str
     chunk_count: int
+
+
+RETRY_EXHAUSTED_FAILURE_MESSAGE = (
+    "Document ingestion failed after the configured retry attempts were exhausted."
+)
 
 
 def _record_permanent_failure(document_id: str, message: str) -> DocumentIngestionResult:
@@ -53,6 +59,30 @@ def _record_permanent_failure(document_id: str, message: str) -> DocumentIngesti
         status=write_result.status,
         chunk_count=write_result.chunk_count,
     )
+
+
+def prepare_document_ingestion_retry(document_id: str) -> DocumentIngestionResult:
+    """Represent a retry countdown as queued without changing terminal states."""
+    try:
+        write_result = mark_document_ingestion_queued_for_retry(document_id=document_id)
+    except DocumentIngestionNotFoundError:
+        raise
+    except Exception as exc:
+        raise RetryableDocumentIngestionError(
+            "Failed to record the queued ingestion retry state."
+        ) from exc
+    return DocumentIngestionResult(
+        document_id=write_result.document_id,
+        status=write_result.status,
+        chunk_count=write_result.chunk_count,
+    )
+
+
+def finalize_document_ingestion_retry_exhaustion(
+    document_id: str,
+) -> DocumentIngestionResult:
+    """Persist a sanitized terminal failure while preserving a ready winner."""
+    return _record_permanent_failure(document_id, RETRY_EXHAUSTED_FAILURE_MESSAGE)
 
 
 def ingest_document(

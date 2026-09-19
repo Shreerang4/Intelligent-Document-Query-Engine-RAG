@@ -123,10 +123,11 @@ used, not while importing the application. Missing configuration returns a safe
 cannot authenticate RAG/history endpoints. Conversely, a user JWT cannot access
 `/health/db`. Public `GET /health` remains independent of this token.
 
-### Private Object Storage Foundation
+### Private Object Storage
 
-The storage abstraction exists, but current RAG routes do not yet retain PDFs
-through it. Before enabling the future asynchronous upload path:
+The asynchronous document upload route retains source PDFs through the storage
+abstraction. The synchronous RAG routes remain unchanged. Before enabling the
+asynchronous upload path in an environment:
 
 - With `OBJECT_STORAGE_BACKEND=local`, use an absolute durable path outside
   publicly served directories and mount the same contents into API and worker
@@ -140,6 +141,38 @@ through it. Before enabling the future asynchronous upload path:
   permissions. Database backups contain metadata, not the PDF bytes.
 - Source PDFs are intended to remain available for a later authenticated,
   short-lived signed-URL flow. No viewing or signed-URL endpoint exists yet.
+
+### RabbitMQ, Celery, and Async Upload
+
+`POST /documents/upload` stores private PDFs and publishes document IDs for the
+separate worker. Existing synchronous routes remain unchanged.
+
+- Run the ingestion worker as a separate process using
+  `celery -A backend.app.celery_app worker --loglevel=INFO --concurrency=1`.
+- Configure `CELERY_BROKER_URL` independently for every publisher and worker;
+  do not assume RabbitMQ is colocated with FastAPI.
+- Keep the initial concurrency at one because each worker child can load an E5
+  model and PDF embedding is CPU- and RAM-intensive.
+- With local object storage, mount the same durable object volume at the same
+  configured path in the API and worker. With S3-compatible storage, give both
+  processes access to the same private bucket and prefix.
+- RabbitMQ messages contain only the opaque `document_id`. MySQL remains the
+  authority for ownership, object metadata, lifecycle status, and artifacts.
+- Celery has no result backend. Alert on worker/task failures and inspect the
+  document's MySQL status rather than polling Celery results.
+- A retry countdown is represented by `queued`; active work is represented by
+  `processing`. The default permits three retries after the initial attempt.
+- Broker publisher errors return a structured 503 while leaving the committed
+  document queued and retaining its PDF. Do not mark ambiguous publication
+  failures as failed.
+- Clients should always send a stable `upload_request_id`. Retrying it repairs
+  the remaining database-commit/publish crash window without creating another
+  document. No transactional outbox or queued-row reconciler exists yet.
+- Apply migration 005 before enabling the endpoint against an existing MySQL
+  database.
+
+See [`document_ingestion_worker.md`](document_ingestion_worker.md) for the full
+task contract and local Compose instructions.
 
 ## Accepted Account-State Staleness
 

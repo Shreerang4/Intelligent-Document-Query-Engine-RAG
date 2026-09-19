@@ -1,0 +1,57 @@
+name: intelligent-document-query-engine
+
+x-application-service: &application-service
+  image: intelligent-document-query-engine:local
+  build:
+    context: .
+  env_file:
+    - .env
+  environment: &application-environment
+    CELERY_BROKER_URL: ${COMPOSE_CELERY_BROKER_URL:-amqp://idqe:idqe-local@rabbitmq:5672//}
+    OBJECT_STORAGE_LOCAL_ROOT: /var/lib/idqe/object-storage
+  volumes:
+    - document-objects:/var/lib/idqe/object-storage
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-idqe}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-idqe-local}
+    ports:
+      - "5672:5672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    environment:
+      <<: *application-environment
+      ACCESS_JWT_SECRET: ${ACCESS_JWT_SECRET}
+    <<: *application-service
+    command: ["python", "start.py"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "7860:7860"
+  worker:
+    <<: *application-service
+    command:
+      - celery
+      - -A
+      - backend.app.celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  document-objects:
+  rabbitmq-data:

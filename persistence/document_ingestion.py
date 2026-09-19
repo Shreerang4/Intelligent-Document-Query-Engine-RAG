@@ -147,6 +147,57 @@ def mark_document_ingestion_failed(
             raise
 
 
+def mark_document_ingestion_queued_for_retry(
+    *,
+    document_id: str,
+) -> DocumentIngestionWriteResult:
+    """Move processing back to queued without overwriting a terminal state."""
+    from persistence.db import SessionLocal
+    from persistence.models import Chunk
+
+    with SessionLocal() as session:
+        try:
+            document = _locked_document(session, document_id)
+            if document.status in {DOCUMENT_STATUS_READY, LEGACY_DOCUMENT_STATUS_INGESTED}:
+                chunk_count = int(
+                    session.scalar(
+                        select(func.count()).select_from(Chunk).where(
+                            Chunk.user_id == document.user_id,
+                            Chunk.document_id == document.id,
+                        )
+                    )
+                    or 0
+                )
+                return DocumentIngestionWriteResult(
+                    document_id=str(document.id),
+                    status=DOCUMENT_STATUS_READY,
+                    chunk_count=chunk_count,
+                )
+            if document.status == DOCUMENT_STATUS_FAILED:
+                return DocumentIngestionWriteResult(
+                    document_id=str(document.id),
+                    status=DOCUMENT_STATUS_FAILED,
+                    chunk_count=0,
+                )
+            if document.status == DOCUMENT_STATUS_PROCESSING:
+                document.status = DOCUMENT_STATUS_QUEUED
+                document.error_message = None
+                session.commit()
+            elif document.status != DOCUMENT_STATUS_QUEUED:
+                raise DocumentIngestionStateError(
+                    f"Document has unsupported ingestion status {document.status!r}."
+                )
+
+            return DocumentIngestionWriteResult(
+                document_id=str(document.id),
+                status=DOCUMENT_STATUS_QUEUED,
+                chunk_count=0,
+            )
+        except Exception:
+            session.rollback()
+            raise
+
+
 def persist_document_ingestion_atomic(
     *,
     document_id: str,

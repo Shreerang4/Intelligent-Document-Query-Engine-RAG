@@ -272,6 +272,29 @@
   background: #ffffff;
 }
 
+.field-input:disabled {
+  background: var(--accent-soft);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.document-progress {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+  color: var(--muted-strong);
+}
+
+.document-progress .notice {
+  width: 100%;
+}
+
+.document-progress .ghost-button {
+  margin-top: 10px;
+}
+
 .field-input-file {
   padding: 12px;
 }
@@ -415,19 +438,23 @@
 }
 
 .status-healthy,
-.status-ok {
+.status-ok,
+.status-ready {
   background: rgba(13, 148, 103, 0.12);
   color: #0f7a57;
 }
 
 .status-checking,
-.status-no_context {
+.status-no_context,
+.status-queued,
+.status-processing {
   background: rgba(217, 119, 6, 0.14);
   color: #a35404;
 }
 
 .status-unhealthy,
-.status-error {
+.status-error,
+.status-failed {
   background: rgba(220, 38, 38, 0.12);
   color: #b42318;
 }

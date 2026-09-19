@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { API_BASE_URL, getErrorMessage, rawApiFetch, readResponseBody } from './api/client.js';
+import { getDocumentStatus, queryDocument, uploadDocument } from './api/documentWorkflow.js';
 import AuthScreen from './auth/AuthScreen.jsx';
 import { useAuth } from './auth/AuthContext.jsx';
 import './App.css';
@@ -7,8 +8,8 @@ import './App.css';
 const API_BASE_LABEL = API_BASE_URL || window.location.origin;
 
 const MODE_OPTIONS = [
-  { value: 'url', label: 'PDF URL' },
   { value: 'upload', label: 'Upload PDF' },
+  { value: 'url', label: 'PDF URL' },
 ];
 
 const VIEW_OPTIONS = [
@@ -68,10 +69,13 @@ function AuthenticatedApp() {
   const { user, logout, authenticatedFetch } = useAuth();
   const fileInputRef = useRef(null);
   const pendingUploadRequestRef = useRef(null);
+  const uploadGenerationRef = useRef(0);
   const [activeView, setActiveView] = useState('query');
-  const [mode, setMode] = useState('url');
+  const [mode, setMode] = useState('upload');
   const [documentUrl, setDocumentUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
+  const [uploadedDocument, setUploadedDocument] = useState(null);
+  const [pollingError, setPollingError] = useState('');
   const [questionsText, setQuestionsText] = useState('');
   const [answers, setAnswers] = useState([]);
   const [formError, setFormError] = useState('');
@@ -91,6 +95,8 @@ function AuthenticatedApp() {
   });
 
   const questions = parseQuestions(questionsText);
+  const uploadReady = uploadedDocument?.status === 'ready';
+  const uploadProcessing = uploadedDocument?.status === 'queued' || uploadedDocument?.status === 'processing';
 
   async function refreshHealth() {
     setHealth((current) => ({
@@ -124,6 +130,43 @@ function AuthenticatedApp() {
   useEffect(() => {
     void refreshHealth();
   }, []);
+
+  useEffect(() => {
+    if (mode !== 'upload' || !uploadedDocument || !uploadProcessing || pollingError) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timer;
+    const controller = new AbortController();
+
+    async function pollStatus() {
+      try {
+        const document = await getDocumentStatus(
+          authenticatedFetch, uploadedDocument.document_id, controller.signal,
+        );
+        if (cancelled) return;
+        if (!['queued', 'processing', 'ready', 'failed'].includes(document.status)) {
+          throw new Error('Document status is unavailable.');
+        }
+        setUploadedDocument(document);
+        if (document.status === 'queued' || document.status === 'processing') {
+          timer = window.setTimeout(pollStatus, 2000);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPollingError(error instanceof Error ? error.message : 'Document status is unavailable.');
+        }
+      }
+    }
+
+    timer = window.setTimeout(pollStatus, 1500);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [mode, uploadedDocument?.document_id, uploadedDocument?.status, uploadProcessing, pollingError, authenticatedFetch]);
 
   async function loadHistoryDocuments() {
     setHistoryLoading(true);
@@ -181,15 +224,21 @@ function AuthenticatedApp() {
   }
 
   function handleModeChange(nextMode) {
+    uploadGenerationRef.current += 1;
     setMode(nextMode);
     setFormError('');
     setRequestError('');
-    pendingUploadRequestRef.current = null;
   }
 
   function handleFileChange(event) {
     const nextFile = event.target.files?.[0] || null;
+    uploadGenerationRef.current += 1;
     setFormError('');
+    setRequestError('');
+    setPollingError('');
+    setUploadedDocument(null);
+    setAnswers([]);
+    pendingUploadRequestRef.current = null;
 
     if (!nextFile) {
       setSelectedFile(null);
@@ -208,9 +257,12 @@ function AuthenticatedApp() {
   }
 
   function handleReset() {
-    setMode('url');
+    uploadGenerationRef.current += 1;
+    setMode('upload');
     setDocumentUrl('');
     setSelectedFile(null);
+    setUploadedDocument(null);
+    setPollingError('');
     setQuestionsText('');
     setAnswers([]);
     setFormError('');
@@ -232,11 +284,14 @@ function AuthenticatedApp() {
       return 'PDF URL is required.';
     }
 
-    if (mode === 'upload' && !selectedFile) {
-      return 'Please choose a PDF file to upload.';
-    }
-
-    if (questions.length === 0) {
+    if (mode === 'upload') {
+      if (!uploadReady) {
+        if (uploadProcessing) return 'Document is still processing.';
+        if (!selectedFile) return 'Please choose a PDF file to upload.';
+        return '';
+      }
+      if (questions.length !== 1) return 'Enter one question for this document.';
+    } else if (questions.length === 0) {
       return 'Enter at least one question.';
     }
 
@@ -254,12 +309,27 @@ function AuthenticatedApp() {
 
     setFormError('');
     setRequestError('');
-    setAnswers([]);
+    if (mode === 'url' || !uploadReady) setAnswers([]);
     setRunMeta({ cacheStatus: '', cacheEntries: '' });
     setIsSubmitting(true);
 
     try {
       let response;
+
+      if (mode === 'upload' && !uploadReady) {
+        const pendingRequest = pendingUploadRequestRef.current;
+        const requestId = pendingRequest?.file === selectedFile
+          ? pendingRequest.requestId
+          : crypto.randomUUID();
+        pendingUploadRequestRef.current = { file: selectedFile, requestId };
+        const generation = uploadGenerationRef.current;
+        const document = await uploadDocument(authenticatedFetch, selectedFile, requestId);
+        if (generation !== uploadGenerationRef.current) return;
+        setUploadedDocument(document);
+        setPollingError('');
+        pendingUploadRequestRef.current = null;
+        return;
+      }
 
       if (mode === 'url') {
         response = await authenticatedFetch('/hackrx/run', {
@@ -273,26 +343,19 @@ function AuthenticatedApp() {
           }),
         });
       } else {
-        const questionsKey = JSON.stringify(questions);
-        const pendingRequest = pendingUploadRequestRef.current;
-        const requestId = pendingRequest?.file === selectedFile && pendingRequest.questionsKey === questionsKey
-          ? pendingRequest.requestId
-          : crypto.randomUUID();
-        pendingUploadRequestRef.current = {
-          file: selectedFile,
-          questionsKey,
-          requestId,
-        };
-
-        const formData = new FormData();
-        formData.append('file', selectedFile);
-        formData.append('questions_json', JSON.stringify(questions));
-        formData.append('request_id', requestId);
-
-        response = await authenticatedFetch('/hackrx/upload-run', {
-          method: 'POST',
-          body: formData,
+        const generation = uploadGenerationRef.current;
+        const result = await queryDocument(authenticatedFetch, uploadedDocument.document_id, questions[0]);
+        if (generation !== uploadGenerationRef.current) return;
+        response = result.response;
+        const nextAnswers = Array.isArray(result.payload?.answers) ? result.payload.answers : [];
+        setAnswers((current) => [...current, ...nextAnswers]);
+        setRunMeta({
+          cacheStatus: response.headers.get('X-Document-Cache') || '',
+          cacheEntries: response.headers.get('X-Cache-Entries') || '',
         });
+        setQuestionsText('');
+        await refreshHealth();
+        return;
       }
 
       const payload = await readResponseBody(response);
@@ -306,9 +369,6 @@ function AuthenticatedApp() {
         cacheStatus: response.headers.get('X-Document-Cache') || '',
         cacheEntries: response.headers.get('X-Cache-Entries') || '',
       });
-      if (mode === 'upload') {
-        pendingUploadRequestRef.current = null;
-      }
       await refreshHealth();
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : 'Request failed.');
@@ -381,7 +441,9 @@ function AuthenticatedApp() {
               <p className="panel-kicker">Query setup</p>
               <h2>Document input</h2>
             </div>
-            <span className="subtle-copy">{questions.length} question{questions.length === 1 ? '' : 's'}</span>
+            <span className="subtle-copy">
+              {mode === 'upload' ? 'Upload, then ask' : `${questions.length} question${questions.length === 1 ? '' : 's'}`}
+            </span>
           </div>
 
           <div className="mode-switch" role="tablist" aria-label="PDF input mode">
@@ -426,22 +488,54 @@ function AuthenticatedApp() {
             </label>
           )}
 
+          {mode === 'upload' && uploadedDocument ? (
+            <div className="document-progress" role="status" aria-live="polite">
+              <span className={`status-pill status-${uploadedDocument.status}`}>
+                {uploadedDocument.status === 'ready' ? 'Ready' : uploadedDocument.status === 'failed' ? 'Failed' : 'Processing'}
+              </span>
+              <span>
+                {uploadReady
+                  ? 'Document ready. Ask a question below.'
+                  : uploadedDocument.status === 'failed'
+                    ? 'Document processing failed. Upload the PDF again to retry.'
+                    : 'Processing your PDF. The question box will open when it is ready.'}
+              </span>
+              {pollingError ? (
+                <div className="notice notice-error">
+                  {pollingError}
+                  <button type="button" className="ghost-button" onClick={() => setPollingError('')}>
+                    Retry status
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <label className="field">
-            <span className="field-label">Questions</span>
+            <span className="field-label">{mode === 'upload' ? 'Question' : 'Questions'}</span>
             <textarea
               className="field-input field-textarea"
-              placeholder={'What is this document about?\nWhat are the key dates?\nWhich sections mention exclusions?'}
+              placeholder={mode === 'upload'
+                ? 'What is this document about?'
+                : 'What is this document about?\nWhat are the key dates?\nWhich sections mention exclusions?'}
               value={questionsText}
               onChange={(event) => setQuestionsText(event.target.value)}
+              disabled={mode === 'upload' && !uploadReady}
             />
-            <span className="field-help">Enter one question per line</span>
+            <span className="field-help">
+              {mode === 'upload'
+                ? uploadReady ? 'Ask one question at a time.' : 'Available after document processing finishes.'
+                : 'Enter one question per line'}
+            </span>
           </label>
 
           {formError ? <div className="notice notice-error">{formError}</div> : null}
 
           <div className="actions">
-            <button type="submit" className="primary-button" disabled={isSubmitting}>
-              {isSubmitting ? 'Running query...' : 'Run Query'}
+            <button type="submit" className="primary-button" disabled={isSubmitting || (mode === 'upload' && uploadProcessing)}>
+              {isSubmitting
+                ? mode === 'upload' && !uploadReady ? 'Uploading...' : 'Running query...'
+                : mode === 'upload' && !uploadReady ? 'Upload PDF' : 'Run Query'}
             </button>
             <button type="button" className="secondary-button" onClick={handleReset} disabled={isSubmitting}>
               Clear
@@ -496,7 +590,7 @@ function AuthenticatedApp() {
 
           <div className="support-card">
             <p className="support-title">Supported modes</p>
-            <p className="support-copy">Run the existing URL workflow or upload a local PDF without changing the backend contract.</p>
+            <p className="support-copy">Query a PDF URL directly, or upload a PDF and ask questions after processing finishes.</p>
           </div>
         </aside>
       </div>
@@ -524,13 +618,15 @@ function AuthenticatedApp() {
         {isSubmitting ? (
           <div className="loading-box" aria-live="polite">
             <span className="spinner" aria-hidden="true" />
-            Running document query...
+            {mode === 'upload' && !uploadReady ? 'Uploading PDF...' : 'Running document query...'}
           </div>
         ) : null}
 
         {!isSubmitting && !requestError && answers.length === 0 ? (
           <div className="empty-state">
-            Submit a PDF URL or upload a PDF to see grounded answers with source excerpts.
+            {mode === 'upload' && !uploadReady
+              ? 'Upload a PDF and wait for processing before asking a question.'
+              : 'Ask a question to see a grounded answer with source excerpts.'}
           </div>
         ) : null}
 

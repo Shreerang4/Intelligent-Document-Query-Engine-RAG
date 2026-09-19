@@ -24,4 +24,4 @@ COPY --from=frontend-build /frontend/dist ./frontend/dist
 
 EXPOSE 7860
 
-CMD ["python", "start.py"]
+CMD ["python", "production_start.py"]

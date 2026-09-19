@@ -154,6 +154,11 @@ Backend variables referenced by the code:
 | `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` | S3 backend | boto3 provider chain | Optional explicit secret; must accompany the explicit access key. |
 | `OBJECT_STORAGE_S3_SESSION_TOKEN` | S3 backend | none | Optional token for explicit temporary credentials. |
 | `OBJECT_STORAGE_S3_ADDRESSING_STYLE` | S3 backend | `auto` | S3 addressing style: `auto`, `path`, or `virtual`. |
+| `CELERY_BROKER_URL` | Worker/publisher | `amqp://guest:guest@localhost:5672//` | RabbitMQ URL. Configure API publishers and workers independently when they run on separate infrastructure. |
+| `DOCUMENT_INGESTION_QUEUE` | No | `document_ingestion` | Queue used only for document-ingestion tasks. |
+| `DOCUMENT_INGESTION_MAX_RETRIES` | No | `3` | Retries after the initial attempt, allowing at most four total attempts by default. |
+| `DOCUMENT_INGESTION_RETRY_BACKOFF_SECONDS` | No | `5` | Initial retry-delay cap in seconds before full jitter is applied. |
+| `DOCUMENT_INGESTION_RETRY_BACKOFF_MAX_SECONDS` | No | `300` | Maximum retry-delay cap in seconds. |
 | `PORT` | No | `7860` | Uvicorn port used by `start.py`. |
 | `MAX_PDF_BYTES` | No | `15728640` | Maximum PDF size in bytes. |
 | `HTTP_TIMEOUT_SECONDS` | No | `30` | Timeout for PDF URL downloads. |
@@ -196,12 +201,31 @@ $env:PORT="7860"
 py start.py
 ```
 
-The storage-only foundation defaults to a private local directory. A future
+The object-storage foundation defaults to a private local directory. A future
 split API/worker deployment must configure the same absolute mounted path in
 both processes. For S3-compatible storage, configure a private bucket and the
 optional endpoint and region. Explicit credentials are optional; when absent,
 boto3 uses its standard credential provider chain. The code does not set object
 ACLs, construct public URLs, or expose object keys through the current API.
+
+`POST /documents/upload` now stores a private PDF, commits its owned queued
+document row, and publishes only the document ID for Celery ingestion. The
+browser upload workflow polls ingestion status before enabling document queries.
+Run the worker separately with:
+
+```powershell
+.venv\Scripts\celery.exe -A backend.app.celery_app worker --loglevel=INFO --concurrency=1
+```
+
+For a local RabbitMQ, API, and worker stack using one application image:
+
+```powershell
+docker compose up --build rabbitmq api worker
+```
+
+The Compose API and worker share the same private local-object volume. See
+[`docs/document_ingestion_worker.md`](docs/document_ingestion_worker.md) for
+the payload contract, retry lifecycle, and deployment configuration.
 
 Frontend:
 
@@ -245,7 +269,8 @@ Generated files under `eval/results/` are ignored by git. Commit lightweight sum
 
 ## Docker / Hugging Face Spaces Deployment
 
-The Dockerfile builds the frontend with Node 20, then creates a Python runtime image. It installs CPU-only PyTorch and Python dependencies, copies the built frontend into `frontend/dist`, exposes port `7860`, and runs `python start.py`.
+The Dockerfile builds the frontend with Node 20, then creates a Python runtime image. It installs CPU-only PyTorch and Python dependencies, copies the built frontend into `frontend/dist`, exposes port `7860`, and runs `python production_start.py` to supervise the API and one concurrency-1 Celery worker.
+Set `CELERY_BROKER_URL` as a Hugging Face Space secret so both the API publisher and worker use the external RabbitMQ broker.
 
 Build and run locally:
 
@@ -292,10 +317,13 @@ keeps each tab's access JWT in memory, restores sessions on page load, and
 retries an authenticated request at most once after refresh. It never reads the
 refresh cookie or persists/shares an access token.
 
-### RAG and history endpoints
+### Document, RAG, and history endpoints
 
 | Method and route | Purpose |
 | --- | --- |
+| `POST /documents/upload` | Store a private PDF, create an owned queued document, and publish its ID for background ingestion. |
+| `GET /documents/{document_id}` | Return the owned document's current ingestion lifecycle status. |
+| `POST /documents/{document_id}/queries` | Query a ready owned document using its persisted chunks and embeddings. |
 | `POST /hackrx/run` | Run the RAG pipeline against a PDF URL. |
 | `POST /hackrx/upload-run` | Run the pipeline against an uploaded PDF; accepts an optional idempotent `request_id`. |
 | `GET /history/documents` | List documents owned by the JWT subject. |
@@ -305,6 +333,22 @@ refresh cookie or persists/shares an access token.
 All of these routes require `Authorization: Bearer <access JWT>`. Ownership is
 derived exclusively from the validated JWT subject. A private document or query
 owned by someone else is returned as not found.
+
+The asynchronous upload route accepts multipart `file` and optional
+`upload_request_id` fields. It returns 202 for queued/processing work and may
+return 200 when the same request UUID recovers an already-ready or failed
+document. Responses never expose object keys or storage/broker configuration.
+The frontend generates and reuses an `upload_request_id`:
+that UUID is the recovery mechanism if the database commit succeeds but the
+process exits before task publication. Reusing it with different PDF bytes
+returns HTTP 409.
+
+A visible RabbitMQ publication error returns HTTP 503 with the authoritative
+`document_id`. The source PDF is retained and the document remains `queued`
+because publisher-confirmation failures can be ambiguous. Retrying the same
+upload request UUID safely republishes the document ID. A process crash in the
+small interval between DB commit and publication can leave a queued row without
+a message; no transactional outbox or reconciler exists yet.
 
 Example URL request:
 
@@ -370,6 +414,7 @@ recovery; migration 002 introduces the production multi-user authentication
 schema and cleans obsolete placeholder-era data. Migration 003 adds nullable
 private-object metadata. Migration 004 converts completed legacy `ingested`
 rows to `ready` and establishes `queued` as the default for future documents.
+Migration 005 adds the owned asynchronous-upload idempotency UUID.
 The migrations have dedicated guarded
 rehearsal and real-MySQL integration coverage. New databases are initialized
 without seeded user identities. Schema details and verification queries live in
