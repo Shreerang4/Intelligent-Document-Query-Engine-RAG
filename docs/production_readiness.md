@@ -1,236 +1,93 @@
-# Production Readiness: Authentication and Ownership
+# Production readiness and verification
 
-This document records the Phase 7A configuration audit and the real-MySQL
-verification procedure. It does not authorize a production deployment or a
-production run of migration 002.
+The application implements async upload, object-backed source retention, RabbitMQ/Celery ingestion, persisted embeddings, document queries, duplicate choice, multi-user ownership and rotating refresh sessions. The current HF deployment co-locates API and a concurrency-1 worker, with external CloudAMQP, Aiven, Backblaze B2 and Groq. See [deployment](deployment.md) for topology/configuration and [security](security.md) for implemented controls.
 
-## Refresh Rotation Transaction Invariant
+This document distinguishes repository checks from live operational evidence. A passing unit suite or successful git push does not establish provider configuration, worker progress, backup restorability, or production capacity. No current throughput/availability target is claimed.
 
-Refresh rotation depends on MySQL/InnoDB row locking. One SQLAlchemy `Session`
-must execute the following sequence without an intervening commit:
+## What the tests cover
 
-1. `SELECT refresh_sessions ... WHERE token_hash = :digest FOR UPDATE`
-2. validate expiry and revocation state
-3. load the owning user in the same transaction
-4. insert and flush exactly one successor using the predecessor's absolute
-   `expires_at`
-5. set the predecessor's `revoked_at` and `replaced_by_session_id`
-6. flush and commit
+| Area | Existing suite |
+| --- | --- |
+| Passwords, JWTs, auth HTTP, refresh transactions/cookies | `tests/test_auth_*.py`, `test_access_jwt.py`, `test_refresh_sessions.py` |
+| Ownership, request recovery, stored vectors/history | `test_persistence_ownership.py`, `test_persistent_upload_storage.py`, `test_rag_jwt_authorization.py`, `test_upload_cache_flow.py` |
+| Storage implementations and metadata | `test_object_storage.py`, `test_document_object_persistence.py` |
+| Upload acceptance, duplicate checks, lifecycle/status/query | `test_document_upload_*.py`, `test_document_query_api.py` |
+| Ingestion, task settings/publication/retry | `test_document_ingestion_*.py`, `test_celery_app.py` |
+| Supervisor, Compose, TLS, security headers | `test_production_start.py`, `test_compose.py`, `test_database_tls_config.py`, `test_security_headers.py` |
+| Retrieval metric calculations | `eval/test_metrics.py`; pure metric tests, not a performance run |
+| Frontend | Node tests in `frontend/tests/` for auth/session/API helpers and source-level UI/security assertions |
 
-`rotate_refresh_session_in_transaction()` stages steps 1–5. The service wrapper
-or HTTP refresh endpoint owns the single commit. Any refresh-service,
-SQLAlchemy, or JWT-configuration failure rolls the transaction back.
+Models, transport and storage are mocked in relevant focused tests. Frontend tests include static source checks; they are not a real-browser end-to-end suite. Supervisor tests use fake child processes. No ordinary test run proves live CloudAMQP/B2/Groq behavior. Test counts are intentionally not frozen into this document.
 
-Correctness requires `users` and `refresh_sessions` to use InnoDB. With two
-connections rotating R1, the second locking read waits for the first
-transaction, then observes the committed revocation. The required final graph
-is one revoked R1 pointing to one active R2; branching to both R2 and R3 is not
-valid.
+## Routine validation
 
-## Disposable MySQL Verification
-
-The integration suite is intentionally destructive and skips unless
-`MYSQL_TEST_DATABASE_URL` is set. As an additional guard, the selected database
-name must contain `test`, `testing`, or `disposable`. Never point it at
-production or a database containing useful data.
-
-For a TLS-enabled test server, set `MYSQL_TEST_CA_CERT` to its CA certificate.
-The tests never print the URL, password, or certificate.
+Activate the repository's Python environment and run from the root:
 
 ```powershell
-$env:MYSQL_TEST_DATABASE_URL="mysql+pymysql://.../idqe_auth_test"
-$env:MYSQL_TEST_CA_CERT="C:\path\to\test-ca.pem" # when required
-.venv\Scripts\python.exe -m pytest -q -m mysql_integration
+python -m pytest -q
+python -m compileall -q main.py backend persistence eval scripts tests
+python -m compileall -q start.py production_start.py
+python -m pip check
+python -c "import main, production_start, backend.app.celery_app; print('Imports OK')"
+git diff --check
+docker compose config --quiet
+Push-Location frontend
+npm test
+npm run build
+Pop-Location
 ```
 
-The suite:
+Imports should use a valid local/test configuration; MySQL import requires its CA settings. They do not create tables or load embedding/reranker models, but database configuration initialization can materialize the configured CA file. Use `DATABASE_URL=sqlite:///:memory:` and clear deployment CA settings for an isolated import-only check when appropriate. `docker compose config --quiet` requires the referenced local `.env` file and validates the Compose model without printing resolved secrets or starting services.
 
-- creates the auth schema and confirms `users` and `refresh_sessions` are
-  InnoDB;
-- forces two independent connections to overlap on the same R1 locking read;
-- proves the second operation is waiting before allowing the first to commit;
-- verifies exactly one success, one revoked-token failure, and one successor;
-- verifies a staged rotation can be rolled back without a successor or partial
-  predecessor update;
-- builds a representative pre-auth schema, inserts disposable placeholder
-  history, runs migration 002 twice, and inspects its columns, indexes, foreign
-  keys, delete rules, cleanup, and InnoDB engines;
-- mounts the real auth router against the migrated database and verifies
-  registration and login.
+`pip check` concerns the selected Python environment, not the contents of a built Docker image. Do not alter dependency pins merely to hide unrelated environment drift. The Docker build compiles the frontend; `npm run build` verifies it separately without a full image build.
 
-If the environment variable is absent, skipped tests do not constitute MySQL or
-migration verification.
+## Guarded MySQL verification
 
-## Production Configuration Audit
+The `mysql_integration` tests are intentionally destructive and skip unless `MYSQL_TEST_DATABASE_URL` names a MySQL database containing `test`, `testing`, or `disposable`. Never select production or any database with useful data. Use a dedicated database and private environment injection; do not paste a credential-bearing URL into committed commands.
 
-### Access JWT
-
-- `ACCESS_JWT_SECRET` is required when JWT functionality is used and must be at
-  least 32 UTF-8 bytes. There is no default signing secret.
-- Only HS256 is accepted.
-- `ACCESS_TOKEN_TTL_SECONDS` defaults to 600 seconds.
-- `sub`, `iat`, `exp`, `jti`, `iss`, and `aud` are required.
-- Signature, expiration, issued-at, issuer
-  `intelligent-document-query-engine`, and audience
-  `intelligent-document-query-engine-api` are validated.
-- `API_TOKEN` is never reused as the JWT secret.
-
-### Refresh Cookie
-
-- Name: `idqe_refresh`
-- `HttpOnly=true`
-- `Secure=true` by default; production must not set
-  `REFRESH_COOKIE_SECURE=false`
-- `SameSite=Lax`
-- `Path=/auth`
-- no `Domain` attribute, making it host-only
-- `Expires` and `Max-Age` use the refresh session's remaining absolute expiry;
-  rotation does not extend the seven-day lifetime
-
-### Origin and CORS
-
-- Every state-changing auth endpoint retains the Origin/Referer validation
-  dependency.
-- Same-origin browser requests are accepted.
-- A separate production frontend origin must be listed exactly in
-  `AUTH_ALLOWED_ORIGINS`; wildcard values are invalid.
-- Built-in local-development allowances are exact localhost/127.0.0.1 origins
-  on ports 3000 and 5173. They do not match arbitrary hosts or production
-  domains.
-- CORS credentials remain enabled only with an explicit origin list. The list
-  is never `*`.
-- The production frontend remains same-origin by default; no CORS relaxation is
-  required for bearer JWTs.
-
-### Database TLS
-
-- Every configured MySQL URL requires `DB_CA_CERT` or `DB_CA_CERT_B64`.
-- PyMySQL receives the CA through `ssl.ca`, enabling certificate validation.
-- `DB_ALLOW_LOCAL_TEST_CERT_HOSTNAME_MISMATCH=true` may disable only hostname
-  matching for loopback databases explicitly named as test/disposable. The CA
-  and signature remain verified, and the override is rejected for production
-  hosts or database names.
-- The base64 deployment secret is decoded to `/tmp/aiven-ca.pem`, permissioned
-  `0600`, and its contents are never logged.
-- Confirm the production provider's current CA is installed and that all
-  user/auth tables report `ENGINE=InnoDB` before rollout.
-
-### Operational Database Health Token
-
-`API_TOKEN` protects only `GET /health/db`. It is read when that endpoint is
-used, not while importing the application. Missing configuration returns a safe
-503; a wrong token returns 401. The token is compared in constant time and
-cannot authenticate RAG/history endpoints. Conversely, a user JWT cannot access
-`/health/db`. Public `GET /health` remains independent of this token.
-
-### Private Object Storage
-
-The asynchronous document upload route retains source PDFs through the storage
-abstraction. The synchronous RAG routes remain unchanged. Before enabling the
-asynchronous upload path in an environment:
-
-- With `OBJECT_STORAGE_BACKEND=local`, use an absolute durable path outside
-  publicly served directories and mount the same contents into API and worker
-  processes.
-- With `OBJECT_STORAGE_BACKEND=s3`, enforce private access using the provider's
-  public-access controls and bucket/account policy. The application sends no
-  object ACL, never requests `public-read`, and constructs no public URL.
-- Store explicit S3 credentials as secrets. If they are absent, boto3 uses its
-  standard provider chain, allowing IAM roles and workload identity.
-- Grant the runtime principal only the required object-prefix get/put/delete
-  permissions. Database backups contain metadata, not the PDF bytes.
-- Source PDFs are intended to remain available for a later authenticated,
-  short-lived signed-URL flow. No viewing or signed-URL endpoint exists yet.
-
-### RabbitMQ, Celery, and Async Upload
-
-`POST /documents/upload` stores private PDFs and publishes document IDs for the
-separate worker. Existing synchronous routes remain unchanged.
-
-- Run the ingestion worker as a separate process using
-  `celery -A backend.app.celery_app worker --loglevel=INFO --concurrency=1`.
-- Configure `CELERY_BROKER_URL` independently for every publisher and worker;
-  do not assume RabbitMQ is colocated with FastAPI.
-- Keep the initial concurrency at one because each worker child can load an E5
-  model and PDF embedding is CPU- and RAM-intensive.
-- With local object storage, mount the same durable object volume at the same
-  configured path in the API and worker. With S3-compatible storage, give both
-  processes access to the same private bucket and prefix.
-- RabbitMQ messages contain only the opaque `document_id`. MySQL remains the
-  authority for ownership, object metadata, lifecycle status, and artifacts.
-- Celery has no result backend. Alert on worker/task failures and inspect the
-  document's MySQL status rather than polling Celery results.
-- A retry countdown is represented by `queued`; active work is represented by
-  `processing`. The default permits three retries after the initial attempt.
-- Broker publisher errors return a structured 503 while leaving the committed
-  document queued and retaining its PDF. Do not mark ambiguous publication
-  failures as failed.
-- Clients should always send a stable `upload_request_id`. Retrying it repairs
-  the remaining database-commit/publish crash window without creating another
-  document. No transactional outbox or queued-row reconciler exists yet.
-- Apply migration 005 before enabling the endpoint against an existing MySQL
-  database.
-
-See [`document_ingestion_worker.md`](document_ingestion_worker.md) for the full
-task contract and local Compose instructions.
-
-## Accepted Account-State Staleness
-
-Normal RAG/history requests use `get_authenticated_user_id()`. This validates
-the signed JWT and returns its canonical UUID without querying `users`.
-Consequently, a deleted or later-disabled account may continue using an
-already-issued token until its remaining lifetime expires, bounded by the
-configured access-token TTL (600 seconds by default).
-
-This is intentional. `/auth/me` and future sensitive account/security
-operations can use the separate DB-backed `get_current_user()` dependency when
-fresh account state is required. Do not add a user lookup to every ordinary
-request solely to remove this accepted window.
-
-## Browser Content Security Policy
-
-FastAPI adds the following enforcing header to production responses:
-
-```text
-Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'; worker-src 'none'
+```powershell
+# Configure MYSQL_TEST_DATABASE_URL privately for a disposable database.
+# Set MYSQL_TEST_CA_CERT to a local CA path when TLS is required.
+python -m pytest -q -m mysql_integration
 ```
 
-- `default-src 'self'` supplies a restrictive same-origin fallback.
-- `script-src 'self'` permits only the built Vite JavaScript bundle.
-- `style-src 'self'` permits only the built CSS asset. The frontend uses system
-  fonts and has no inline or third-party stylesheet requirement.
-- `connect-src 'self'` permits the same-origin auth, RAG, history, and health
-  requests. Groq and model traffic is server-side and is intentionally absent.
-- `img-src 'self'` and `font-src 'self'` prevent third-party resource loading.
-- `object-src 'none'`, `frame-src 'none'`, and `worker-src 'none'` disable
-  browser capabilities the application does not use.
-- `base-uri 'self'`, `form-action 'self'`, and `frame-ancestors 'none'` prevent
-  hostile base URLs, cross-origin form targets, and framing.
+The integration file `tests/test_mysql_auth_integration.py`:
 
-Neither `'unsafe-inline'` nor `'unsafe-eval'` is allowed. FastAPI also returns
-`X-Content-Type-Options: nosniff`. Vite development documents are served by
-Vite and do not receive this production CSP, so HMR does not require weakening
-the deployed policy. Proxied API responses may include the header, but a CSP is
-enforced from the document response.
+- Confirms auth tables use InnoDB, overlaps independent refresh-rotation connections, and verifies one successor rather than a branched token chain.
+- Verifies rollback of staged refresh changes.
+- Builds a representative pre-auth schema, runs migration 002 twice, checks its schema/delete rules/placeholder cleanup, then exercises registration and login against it.
 
-CSP is defense-in-depth. User questions, PDF excerpts, LLM answers, filenames,
-URLs, and backend messages must continue to be rendered through React text
-interpolation; CSP does not replace avoiding raw HTML execution sinks.
+The rotation invariant is one transaction containing locking read, validation, user lookup, successor insert, predecessor revocation/link and commit. The second transaction must observe the committed revocation after waiting. Browser locks reduce races but do not replace this invariant. Skipped integration tests are not evidence of InnoDB verification, and migration-002 rehearsal is not coverage of all migrations or a production migration run.
 
-## Pre-Rollout Gates
+## Operational checks for a release
 
-Before production rollout:
+These are checks to perform in a controlled deployment, not claims that this documentation pass performed them:
 
-1. Run the real InnoDB concurrency test and migration rehearsal against the
-   dedicated disposable database.
-2. Back up production and verify a rollback path.
-3. Confirm production environment variables without printing their values.
-4. Verify InnoDB engines and MySQL TLS with read-only queries.
-5. Apply migration 002 under a separately approved change window.
-6. Apply migration 003 before enabling any route that persists object metadata.
-7. Apply migration 004 before invoking queue-independent ingestion so completed
-   legacy rows use `ready` and newly created rows default to `queued`.
-8. Verify the object bucket or mounted directory is private and durable from
-   every process that will use it.
-9. Perform staging registration, login, refresh, logout, upload, URL query, and
-   two-user ownership smoke tests before deployment.
+1. Review the release diff and secret scan. Keep real `.env`, provider URLs/IDs, CA material and credentials out of git/images.
+2. Back up the database and source-store metadata, establish restore/rollback steps, and rehearse pending migrations. Confirm schema through migration 005 and InnoDB where row locking is required.
+3. Verify database TLS using the provider CA. `DB_ALLOW_LOCAL_TEST_CERT_HOSTNAME_MISMATCH` is only for loopback disposable databases and must not be set in production.
+4. Confirm API/worker share database, broker queue, private object configuration and embedding model/input format. Confirm Secure cookies and exact allowed production origin.
+5. Verify bucket privacy and required object-prefix read/write/delete permissions. Retention/backup settings belong to the provider; the app does not enforce them.
+6. Build/deploy through the existing HF release branch workflow, inspect hosting build/runtime status, and confirm both child processes stay running. A push alone is insufficient runtime evidence.
+7. In a test account, exercise register/login/refresh/logout, upload/poll/query, citations/history, duplicate choices, and cross-user 404 behavior. Check worker logs and the source object through authorized operational tools without exposing credentials.
+8. Exercise publication failure/recovery and duplicate delivery in a disposable environment. Confirm that an original upload UUID can recover queued work; do not treat polling as republication.
+
+## Health and observability limits
+
+`GET /health` returns process version, model/client-loaded flags and document-cache count. It does not test DB, broker, storage, Groq or worker progress. `GET /health/db` checks database connectivity using a separate operational bearer token; a user JWT cannot substitute. An absent token setting yields 503 and an incorrect token yields 401.
+
+Celery has no result backend. MySQL document status is the application-facing record, but queued does not imply a broker message exists and processing does not prove a worker is alive. Logs expose some failure types and document IDs; they are not a complete distributed tracing or audit system. There is no built-in queue-age alert, metrics dashboard, dead-letter administration or automated recovery service.
+
+## Remaining operational limits
+
+- Separate source PUT, metadata commit and message publication leave failure windows. There is no transactional outbox or queued-row reconciler.
+- Late acknowledgement supports worker-loss redelivery, but task execution is not exactly once. Concurrent deliveries may repeat expensive work.
+- The HF supervisor couples API and worker lifetime and has a ten-second shutdown grace period. Concurrency is currently 1; no independent production autoscaling is implemented.
+- Source PDFs remain in private storage. There is no deletion/viewing endpoint or automatic orphan collector; database and object backups must be considered separately.
+- FAISS is process-local. Cache size bounds entries rather than total RAM. Compatible persisted vectors support restart recovery but incompatible model changes need an operational plan.
+- Query history is best effort after response. A successful answer can be missing from history.
+- Content checks are user-scoped but do not serialize concurrent new UUIDs. Browser upload-recovery state is not persisted across reloads.
+- Ordinary user JWT validation is stateless. Logout does not revoke access JWTs; account-state changes are not immediately reflected in every request.
+- No app rate limiting, MFA, email verification, password-reset flow, OCR, formal security certification or current load benchmark is provided.
+
+The detailed [failure table](failure_modes.md) and [security boundaries](security.md) describe practical implications. The [retrieval evaluation](retrieval_evaluation.md) records historical retrieval quality and local timing, not end-to-end production performance.

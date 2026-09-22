@@ -1,4 +1,4 @@
-"""Best-effort query history persistence used by the URL query path."""
+"""Best-effort history persistence for URL and ready-document queries."""
 
 from __future__ import annotations
 

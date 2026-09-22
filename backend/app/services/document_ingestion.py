@@ -1,4 +1,4 @@
-"""Queue-independent source-document ingestion orchestration."""
+"""Source-document ingestion orchestration invoked by the Celery task wrapper."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from persistence.document_ingestion import (
 
 
 class RetryableDocumentIngestionError(RuntimeError):
-    """Raised for infrastructure/model failures that a future task may retry."""
+    """Raised for infrastructure/model failures retried by the Celery wrapper."""
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,7 @@ def ingest_document(
     pdf_parser: Optional[Callable[[bytes], list[ChunkRecord]]] = None,
     embedding_builder: Optional[Callable[[list[ChunkRecord], Any], np.ndarray]] = None,
 ) -> DocumentIngestionResult:
-    """Ingest one stored PDF; suitable for direct use by a future Celery task."""
+    """Ingest one stored PDF using the lifecycle shared with the Celery task."""
     try:
         start = start_document_ingestion(document_id=document_id)
     except DocumentIngestionNotFoundError:

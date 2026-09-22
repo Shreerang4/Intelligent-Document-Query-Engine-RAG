@@ -1,6 +1,8 @@
 name: intelligent-document-query-engine
 
 x-application-service: &application-service
+  # .env must select a shared database reachable by both containers (normally
+  # MySQL). This volume shares source PDFs only, not the default SQLite file.
   image: intelligent-document-query-engine:local
   build:
     context: .
@@ -29,6 +31,7 @@ services:
       retries: 12
 
   api:
+    # Override the production supervisor: Compose runs its own worker service.
     environment:
       <<: *application-environment
       ACCESS_JWT_SECRET: ${ACCESS_JWT_SECRET}

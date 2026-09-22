@@ -1,5 +1,19 @@
 .git
 .gitignore
+# Private local configuration; retain only the obvious example templates.
+.env
+.env.*
+**/.env
+**/.env.*
+*.env
+**/*.env
+!.env.example
+!**/.env.example
+certs/
+# Runtime PDFs and object storage must never be baked into the application image.
+uploads/
+**/uploads/
+**/object-storage/
 __pycache__/
 .pytest_cache/
 .venv/

@@ -1149,7 +1149,7 @@ async def process_question(
     document_id: Optional[str] = None,
     background_tasks: Optional[BackgroundTasks] = None,
 ) -> AnswerItem:
-    """Run one question and retain the URL path's best-effort history behavior."""
+    """Run a URL or ready-document question with best-effort background history."""
     result = await _process_question_result(
         question,
         faiss_index,

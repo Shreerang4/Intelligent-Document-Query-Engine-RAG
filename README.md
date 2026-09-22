@@ -8,106 +8,103 @@ app_port: 7860
 pinned: false
 ---
 
-# Intelligent Document Query Engine - Full-Stack RAG Document QA
+# Intelligent Document Query Engine
 
-Live demo: https://shreerangss-intelligent-document-query-engine.hf.space/
+A full-stack, multi-user PDF question-answering application with asynchronous ingestion, private documents, and answers linked to page and chunk evidence. Upload a PDF, follow its processing status, then ask questions and review citations and claim-verification results. The React/Vite frontend and FastAPI backend are publicly deployed on a Hugging Face Docker Space.
 
+[Live demo](https://shreerangss-intelligent-document-query-engine.hf.space/)
 
+## Engineering highlights
 
-## Overview
+- **Background ingestion:** RabbitMQ and Celery move PDF parsing and embedding out of the upload HTTP request; the UI polls document status.
+- **Durable source and artifacts:** private source PDFs in S3-compatible storage, with document state, chunks, float32 embeddings, and history in MySQL. FAISS can be rebuilt after an API restart from compatible persisted vectors.
+- **User isolation:** validated JWT subjects scope document, history, and process-local cache access.
+- **Authentication:** Argon2id passwords, short-lived access JWTs held in browser memory, and rotating HttpOnly refresh cookies with browser and database concurrency controls.
+- **Upload recovery and user choice:** a per-user request UUID recovers the same upload attempt; content duplicates prompt **Open existing** or **Upload again**.
+- **Evaluated retrieval:** E5-small-v2, FAISS, and TinyBERT reranking, compared with MiniLM and an E5+BM25 ablation on a fixed benchmark.
+- **Inspectable answers:** Answers generated with Groq include application-selected source excerpts and page/chunk references, with a separate claim-verification pass. These aid review; they do not guarantee factual correctness.
 
-Intelligent Document Query Engine is a production-deployed, multi-user PDF
-question-answering application. A React/Vite client sends authenticated requests
-to FastAPI, which parses and chunks PDFs, retrieves and reranks relevant evidence,
-uses Groq to generate grounded answers, and returns page/chunk citations. Users
-have private document and query history backed by Aiven MySQL.
+## Production architecture
 
-The project combines an evaluated RAG pipeline with production authentication,
-explicit ownership checks, restart-safe embedding persistence, and a same-origin
-deployment on Hugging Face Spaces. E5-small-v2 is the default embedding model;
-MiniLM remains available as a benchmark baseline.
-
-## What the System Demonstrates
-
-- React/Vite authentication lifecycle with the access JWT held only in memory,
-  automatic session restoration, and refresh-and-retry-once behavior.
-- FastAPI APIs protected by short-lived JWTs and explicit user-scoped
-  authorization for documents, chunks, queries, citations, and history.
-- Email/password authentication with Argon2id password hashing, ten-minute HS256
-  access JWTs, opaque rotating refresh tokens, and logout/session revocation.
-- Layered refresh concurrency control: a same-tab `refreshPromise`, the browser
-  Web Locks API across tabs, and MySQL/InnoDB row locks on the server.
-- PDF URL and upload ingestion, PyMuPDF extraction, page-aware chunking,
-  E5-small-v2 embeddings, FAISS retrieval, TinyBERT CrossEncoder reranking, and
-  Groq generation with evidence and citations.
-- MySQL-persisted float32 embeddings and request-id recovery, allowing upload
-  FAISS indexes and committed responses to be reconstructed after a restart.
-- Retrieval evaluation across lexical, paraphrase, conceptual, and distractor
-  questions, with MiniLM and hybrid-search comparisons.
-
-## Architecture
+The current deployment uses Hugging Face for the application container, CloudAMQP for RabbitMQ, Aiven for MySQL, Backblaze B2 for private source PDFs, and Groq for inference. Provider choices are environment configuration; the code uses RabbitMQ, SQLAlchemy/MySQL, and S3-compatible interfaces.
 
 ```mermaid
-flowchart TD
-    Browser["Browser / React + Vite<br/>access JWT in memory"]
-    API["FastAPI<br/>JWT-protected APIs"]
-    Identity["JWT sub → user_id<br/>ownership enforcement"]
-    Auth["Auth endpoints<br/>rotating refresh sessions"]
-    Cache["User-scoped RAM / FAISS"]
-    RAG["PDF → E5-small-v2 → FAISS<br/>→ TinyBERT reranker"]
-    DB[("Aiven MySQL / InnoDB<br/>users, sessions, owned history,<br/>chunks and embeddings")]
-    Groq["Groq LLM<br/>openai/gpt-oss-20b"]
-
-    Browser -->|"Bearer access JWT"| API
-    Browser -->|"HttpOnly refresh cookie"| API
-    Browser -. "refreshPromise + Web Lock" .-> API
-    API --> Identity
-    API --> Auth
-    Identity --> Cache
-    Identity --> RAG
-    Identity --> DB
-    Auth -->|"SELECT ... FOR UPDATE"| DB
-    RAG <--> Cache
-    RAG <--> DB
-    RAG --> Groq
+flowchart LR
+    Browser["Browser / React"]
+    subgraph HF["Hugging Face Docker Space"]
+        API["FastAPI + React build"]
+        Worker["Celery worker: concurrency 1"]
+        Parse["PyMuPDF + E5 embeddings"]
+        FAISS["FAISS / RAM cache"]
+        Rank["TinyBERT reranker"]
+    end
+    Objects[("Backblaze B2: private PDFs")]
+    DB[("Aiven MySQL: state, vectors, history")]
+    Broker["CloudAMQP / RabbitMQ"]
+    Groq["Groq: generation + verification"]
+    Browser -->|"HTTP upload, status, query"| API
+    API -->|"source PDF PUT"| Objects
+    API -->|"metadata / artifact reads / history"| DB
+    API -.->|"publish document_id"| Broker
+    Broker -.->|"async delivery"| Worker
+    Objects -.->|"source PDF GET"| Worker
+    Worker -.-> Parse
+    Parse -.->|"atomic artifacts + ready"| DB
+    DB -->|"stored vectors on cache miss"| FAISS
+    API -->|"ready document query"| FAISS
+    FAISS --> Rank
+    Rank --> Groq
+    Groq -->|"answer + verification"| API
+    API -->|"citations / history"| Browser
 ```
 
-### Important Engineering Decisions
+Solid arrows show HTTP/query/store interactions; dashed arrows show background ingestion. Cylinders are persistent stores. FAISS is an in-memory derivative of persisted embeddings. `production_start.py` supervises the API and worker in one container as a low-cost demo deployment choice. Local Compose runs them as separate services. [Architecture and sequence diagrams](docs/architecture.md) describe the boundaries in detail.
 
-- **Authentication:** validated, normalized email addresses are stored directly
-  on users. Passwords are hashed with Argon2id. Access tokens are HS256 JWTs with
-  a 600-second default lifetime; refresh credentials are opaque and stored only
-  as an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. The database stores the
-  refresh-token SHA-256 digest, never the raw token.
-- **Refresh correctness:** callers in one tab share a single in-flight refresh;
-  the stable `idqe-auth-refresh` Web Lock serializes refresh HTTP dispatch across
-  same-origin tabs. InnoDB `SELECT ... FOR UPDATE` is the final correctness layer,
-  preventing a refresh session from branching during rotation.
-- **Authorization:** the validated JWT `sub` is the canonical `user_id` for RAG
-  and history requests. Persistent rows and RAM/FAISS entries are user-scoped.
-  Access to another user's private resource uses not-found behavior rather than
-  revealing that the resource exists.
-- **Recovery:** uploads check user-scoped RAM first, then persisted MySQL chunks
-  and embeddings, and only re-parse/re-embed on a full miss. A committed upload
-  can also be recovered safely by its optional `request_id`.
-- **Queue-independent ingestion:** `ingest_document(document_id)` resolves the
-  private source object from MySQL, uses the same PDF cleaning/chunking and E5
-  implementation as synchronous routes, and atomically commits embeddings
-  before marking the document ready. No broker or worker is wired in yet.
-- **Browser security:** production uses an enforcing Content Security Policy and
-  React's normal safe text rendering. The CSP contains neither `unsafe-inline`
-  nor `unsafe-eval`; cookie-backed auth POSTs also enforce origin/referer checks.
+## Upload lifecycle and recovery
 
-## Retrieval Evaluation
+`POST /documents/upload` validates the PDF, writes its private source object, commits a `queued` document row, then publishes the `document_id`. The worker marks the document `processing`, reads that object, parses and chunks text, embeds it, and commits chunks, vectors, and `ready` state in one transaction. The source PDF is retained. The broker carries identifiers, **never PDF bytes**; MySQL stores the object key and metadata rather than a PDF blob.
 
-The retrieval pipeline was evaluated on a fixed financial-document benchmark:
+| State | Meaning |
+| --- | --- |
+| `queued` | Awaiting ingestion, a retry countdown, or recovery of a publication failure. It does not prove a message is present. |
+| `processing` | Ingestion has started; a crash can leave this state until redelivery. |
+| `ready` | Chunks and embeddings were committed; the owner can query the document. |
+| `failed` | A permanent content error or exhausted retry policy was recorded. |
 
-- 33 labeled questions across Infosys, HDFC Bank, and Bajaj Finance annual reports.
-- Question types: lexical, paraphrase, conceptual, and distractor.
-- Metrics: Recall@3, Recall@5, MRR, needs_review count, retrieval latency, and ingestion/indexing time.
-- Evaluation mode: retrieval-only, no LLM answer generation.
+The browser shows processing status, polls `GET /documents/{document_id}`, and enables the question box when ready. Queries use `POST /documents/{document_id}/queries`.
 
-Final retrieval metrics:
+**Request idempotency comes first.** Send a stable `upload_request_id` UUID for every logical upload attempt. Reusing it with the same bytes recovers that user's document; a queued document can be republished. Reusing it with different bytes returns 409. Recovering a failed document does not restart ingestion. The browser retains this ID for retries within the current upload attempt, but does not persist it across a page reload.
+
+**Duplicate content is a separate check.** After request recovery, the API searches that user's documents by SHA-256 of the PDF bytes. It prefers the newest queued/processing match, otherwise the newest ready match, with a document-ID tie-break. Failed matches are ignored. A match returns 409 without a new object, row, or task:
+
+```json
+{
+  "code": "duplicate_document",
+  "document": {
+    "document_id": "<existing-document-uuid>",
+    "filename": "report.pdf",
+    "status": "ready"
+  }
+}
+```
+
+**Open existing** activates the returned document and resumes polling if needed. **Upload again** sends `allow_duplicate=true`, bypassing only the content check. A fresh request UUID creates another document; an already committed UUID still recovers its original document. Matching never crosses users. There is no unique hash constraint: concurrent new attempts with different UUIDs can both pass the content check. Historical duplicates are retained.
+
+**Delivery is at least once, not exactly once.** Late acknowledgements and worker-loss redelivery can repeat a task. A ready document is a no-op on redelivery; locked artifact persistence preserves an already-ready winner. Classified retryable failures are eligible for up to three retries by default, with jittered exponential backoff. Concurrent deliveries can still repeat parsing/embedding work.
+
+**The database-to-broker gap is explicit.** Publisher confirmations do not make a database commit and broker publication atomic. A visible publication failure returns 503 with the authoritative document ID and retains the queued row and source PDF. Retrying the same upload UUID can republish. A hard crash after the row commit but before publication can leave queued work without a message; there is no transactional outbox or automatic reconciler. [Failure and recovery table](docs/failure_modes.md) and [Worker contract](docs/document_ingestion_worker.md).
+
+## Query path
+
+For an owned, ready document, the API loads ordered chunks and float32 embeddings from MySQL on a cache miss and rebuilds an exact FAISS `IndexFlatL2` index. The bounded document cache holds at most 8 entries per API process, expires entries after 3,600 seconds from creation, and evicts least-recently-used entries at capacity. Its keys include the user, document ID, and embedding configuration.
+
+E5 uses `passage: ` prefixes for chunks and `query: ` for questions. Defaults are 500-character chunks with 50-character overlap, `intfloat/e5-small-v2`, 20 initial FAISS candidates, `cross-encoder/ms-marco-TinyBERT-L-2-v2` reranking, and 8 final context chunks. Groq uses `openai/gpt-oss-20b` for generation and the claim-verification pass. Responses include excerpts, page numbers, chunk IDs, and verification verdicts.
+
+Document-query history and citations are written in a **best-effort post-response background task**. An answer can succeed even if its history write fails. The query endpoint does not reparse PDFs or repair incompatible/missing embeddings: those failures return 503. [Persistence schema and legacy-route distinctions](docs/persistence_schema.md).
+
+## Retrieval evaluation
+
+The fixed corpus contains Infosys, HDFC Bank, and Bajaj Finance annual reports: 33 questions, of which 24 are answerable and 9 unanswerable. Answerable categories include lexical, paraphrase, conceptual, and distractor questions. The historical retrieval-only runs below exclude Groq generation; the latency figures are local retrieval measurements, not live HTTP latency or production throughput.
 
 | Configuration | R@3 | R@5 | MRR | needs_review | p50 | p95 | ingest/index time |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -115,340 +112,112 @@ Final retrieval metrics:
 | E5-small-v2 | 58.3% | 70.8% | 0.496 | 4 | 73 ms | 156 ms | 534.0s |
 | E5+BM25 hybrid | 58.3% | 70.8% | 0.504 | 5 | 216 ms | 527 ms | 510.0s |
 
-Decision summary:
+E5 improved R@5 over MiniLM and reduced the review set. The hybrid ablation achieved slightly higher MRR and rescued one exact-table case, but did not improve R@5, increased `needs_review`, and raised retrieval latency. E5 remains the default; MiniLM is an explicit configuration alternative, not an automatic failure fallback.
 
-- E5-small-v2 improves retrieval quality over the MiniLM baseline, raising R@5 from 62.5% to 70.8% and reducing needs_review from 7 to 4.
-- E5-small-v2 is especially helpful on paraphrase and conceptual questions.
-- E5+BM25 hybrid rescued one exact table case but did not improve R@5, increased needs_review from 4 to 5, and tripled p50 retrieval latency, so it remains a documented ablation rather than the default.
-- Larger embedding candidates were rejected for this environment: GTE was slower and worse than E5, and Qwen3-0.6B CPU ingestion was impractically slow.
-- Remaining misses are documented limitations around table extraction, candidate-pool size, reranker ordering, and benchmark hit criteria.
+The benchmark is small and fixed. Hit matching accepts a supporting-text substring **or a labeled page**, which can count broad page matches. These results do not establish answer factuality or deployment capacity. [Methodology, model trade-offs, and preserved results](docs/retrieval_evaluation.md).
 
-See [docs/retrieval_evaluation.md](docs/retrieval_evaluation.md) for the detailed evaluation summary.
+## Authentication and security
 
-Authentication, MySQL/InnoDB, migration-rehearsal, and production configuration
-gates are documented in
-[docs/production_readiness.md](docs/production_readiness.md).
+Passwords use Argon2id. Access JWTs default to 10 minutes and stay in frontend memory. A host-only, rotating `idqe_refresh` cookie uses HttpOnly, Secure by default, SameSite=Lax, and `/auth`; only its SHA-256 digest is persisted. Rotation retains the original seven-day expiry.
 
-## Configuration
+Same-tab requests share `refreshPromise`; Web Locks serialize refresh dispatch across tabs when supported. InnoDB `SELECT ... FOR UPDATE` is the server correctness layer. User identity comes from the validated JWT subject. Private resources belonging to another user return not found. Auth POSTs check Origin/Referer; credential-bearing successful auth responses use `Cache-Control: no-store`. The served frontend receives a CSP without `unsafe-inline` or `unsafe-eval`.
 
-Backend variables referenced by the code:
+Bucket privacy, provider credentials, network access, and HTTPS remain deployment responsibilities. Groq receives selected text evidence. There is no signed source-PDF viewing/download endpoint. [Security boundaries and limitations](docs/security.md).
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `API_TOKEN` | `/health/db` only | none | Separate operational bearer token loaded lazily by the sensitive database diagnostic. It is not an application-user identity. |
-| `ACCESS_JWT_SECRET` | Yes | none | HS256 signing secret of at least 32 bytes for user access JWTs. |
-| `ACCESS_TOKEN_TTL_SECONDS` | No | `600` | Short-lived access-token lifetime in seconds. |
-| `REFRESH_COOKIE_SECURE` | No | `true` | Controls the refresh cookie's `Secure` attribute. Set explicitly to `false` only for plain-HTTP localhost development. |
-| `AUTH_ALLOWED_ORIGINS` | No | none | Comma-separated exact browser origins additionally accepted by auth POST origin checks. Set the public origin when a reverse proxy changes the backend-observed origin. Documented localhost origins are accepted automatically; wildcards are rejected. |
-| `GROQ_API_KEY` | Yes | none | Used by the Groq SDK for answer generation and claim verification. |
-| `DATABASE_URL` | Production | `sqlite:///./rag_persistence.db` | SQLAlchemy URL for users, refresh sessions, owned RAG history, chunks, and embeddings. Production uses Aiven MySQL. |
-| `DB_CA_CERT` | Local MySQL | none | Local path to the MySQL CA certificate for TLS verification. Do not commit this file. |
-| `DB_CA_CERT_B64` | HF MySQL | none | Base64-encoded CA certificate secret decoded at startup for Hugging Face deployment. |
-| `DB_ALLOW_LOCAL_TEST_CERT_HOSTNAME_MISMATCH` | Local disposable MySQL only | `false` | Keeps CA/signature validation but permits MySQL Community Server's auto-generated certificate without a hostname. Rejected unless the host is loopback and the database name identifies a test/disposable database. Never set in production. |
-| `OBJECT_STORAGE_BACKEND` | No | `local` | Private source-document storage backend: `local` or `s3`. Current routes do not write to it yet. |
-| `OBJECT_STORAGE_LOCAL_ROOT` | Local backend | `./uploads/object-storage` | Private filesystem root. Future API and worker processes must mount the same durable absolute path. |
-| `OBJECT_STORAGE_S3_ENDPOINT_URL` | S3-compatible provider | AWS default | Optional custom S3-compatible endpoint. |
-| `OBJECT_STORAGE_S3_BUCKET` | S3 backend | none | Required private bucket. Public access must be blocked by bucket/account policy. |
-| `OBJECT_STORAGE_S3_REGION` | S3 backend | provider default | Optional bucket region. |
-| `OBJECT_STORAGE_S3_ACCESS_KEY_ID` | S3 backend | boto3 provider chain | Optional explicit access key. Leave unset with the secret to use IAM roles, workload identity, or shared configuration. |
-| `OBJECT_STORAGE_S3_SECRET_ACCESS_KEY` | S3 backend | boto3 provider chain | Optional explicit secret; must accompany the explicit access key. |
-| `OBJECT_STORAGE_S3_SESSION_TOKEN` | S3 backend | none | Optional token for explicit temporary credentials. |
-| `OBJECT_STORAGE_S3_ADDRESSING_STYLE` | S3 backend | `auto` | S3 addressing style: `auto`, `path`, or `virtual`. |
-| `CELERY_BROKER_URL` | Worker/publisher | `amqp://guest:guest@localhost:5672//` | RabbitMQ URL. Configure API publishers and workers independently when they run on separate infrastructure. |
-| `DOCUMENT_INGESTION_QUEUE` | No | `document_ingestion` | Queue used only for document-ingestion tasks. |
-| `DOCUMENT_INGESTION_MAX_RETRIES` | No | `3` | Retries after the initial attempt, allowing at most four total attempts by default. |
-| `DOCUMENT_INGESTION_RETRY_BACKOFF_SECONDS` | No | `5` | Initial retry-delay cap in seconds before full jitter is applied. |
-| `DOCUMENT_INGESTION_RETRY_BACKOFF_MAX_SECONDS` | No | `300` | Maximum retry-delay cap in seconds. |
-| `PORT` | No | `7860` | Uvicorn port used by `start.py`. |
-| `MAX_PDF_BYTES` | No | `15728640` | Maximum PDF size in bytes. |
-| `HTTP_TIMEOUT_SECONDS` | No | `30` | Timeout for PDF URL downloads. |
-| `RETRIEVAL_K_INITIAL` | No | `20` | Initial FAISS retrieval count before reranking in the app path. |
-| `RETRIEVAL_K_FINAL` | No | `8` | Final chunk count after reranking in the app path. |
-| `RETRIEVAL_MODE` | No | `faiss_reranker` | Retrieval path. Experimental option: `e5_bm25_reranker`. |
-| `HYBRID_E5_K_INITIAL` | No | `30` | E5 candidate count for the hybrid experiment. |
-| `HYBRID_BM25_K_INITIAL` | No | `20` | BM25 candidate count for the hybrid experiment. |
-| `HYBRID_K_FINAL` | No | `5` | Final reranked chunk count for the hybrid experiment. |
-| `MAX_CONCURRENT_QUESTIONS` | No | `4` | Concurrent question processing limit. |
-| `DOCUMENT_CACHE_MAX_ITEMS` | No | `8` | Maximum number of cached document indexes. |
-| `DOCUMENT_CACHE_TTL_SECONDS` | No | `3600` | Document cache TTL in seconds. |
-| `EMBEDDING_MODEL_NAME` | No | `intfloat/e5-small-v2` | Hugging Face embedding model name. Set `all-MiniLM-L6-v2` to use the MiniLM fallback/baseline. |
-| `RERANKER_MODEL_NAME` | No | `cross-encoder/ms-marco-TinyBERT-L-2-v2` | CrossEncoder reranker model name. |
-| `LLM_MODEL_NAME` | No | `openai/gpt-oss-20b` | Groq model name. |
+## API surface
 
-Frontend variable:
+Interactive schemas are available at `/docs`. Application routes require a user access JWT unless noted.
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `VITE_API_BASE_URL` | No | same origin | Optional API base URL for local Vite development. |
-
-## Local Development
-
-Backend:
-
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install --upgrade pip
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
-$env:GROQ_API_KEY="your_groq_api_key"
-$env:API_TOKEN="your_operational_health_token"
-$env:ACCESS_JWT_SECRET="replace-with-at-least-32-random-bytes"
-$env:REFRESH_COOKIE_SECURE="false"
-$env:DATABASE_URL="mysql+pymysql://..."
-$env:DB_CA_CERT="certs/ca.pem"
-$env:PORT="7860"
-py start.py
-```
-
-The object-storage foundation defaults to a private local directory. A future
-split API/worker deployment must configure the same absolute mounted path in
-both processes. For S3-compatible storage, configure a private bucket and the
-optional endpoint and region. Explicit credentials are optional; when absent,
-boto3 uses its standard credential provider chain. The code does not set object
-ACLs, construct public URLs, or expose object keys through the current API.
-
-`POST /documents/upload` now stores a private PDF, commits its owned queued
-document row, and publishes only the document ID for Celery ingestion. The
-browser upload workflow polls ingestion status before enabling document queries.
-Run the worker separately with:
-
-```powershell
-.venv\Scripts\celery.exe -A backend.app.celery_app worker --loglevel=INFO --concurrency=1
-```
-
-For a local RabbitMQ, API, and worker stack using one application image:
-
-```powershell
-docker compose up --build rabbitmq api worker
-```
-
-The Compose API and worker share the same private local-object volume. See
-[`docs/document_ingestion_worker.md`](docs/document_ingestion_worker.md) for
-the payload contract, retry lifecycle, and deployment configuration.
-
-Frontend:
-
-```powershell
-cd frontend
-copy .env.example .env
-npm install
-npm run dev
-```
-
-Local Vite development uses the same-origin proxy for `/auth`, `/hackrx`,
-`/history`, and `/health` by default. Leave `VITE_API_BASE_URL` empty unless a
-direct backend origin is specifically required; the proxy most closely matches
-production refresh-cookie behavior.
-
-## Evaluation Commands
-
-MiniLM baseline:
-
-```powershell
-$env:EMBEDDING_MODEL_NAME='all-MiniLM-L6-v2'
-.venv\Scripts\python.exe eval\runner.py --no-llm --out eval\results\stage2d_minilm
-```
-
-E5-small-v2:
-
-```powershell
-$env:EMBEDDING_MODEL_NAME='intfloat/e5-small-v2'
-.venv\Scripts\python.exe eval\runner.py --no-llm --out eval\results\stage2d_e5_small_v2
-```
-
-E5+BM25 hybrid ablation:
-
-```powershell
-$env:EMBEDDING_MODEL_NAME='intfloat/e5-small-v2'
-$env:RETRIEVAL_MODE='e5_bm25_reranker'
-.venv\Scripts\python.exe eval\runner.py --no-llm --out eval\results\stage2e_e5_bm25_hybrid
-```
-
-Generated files under `eval/results/` are ignored by git. Commit lightweight summaries under `docs/` instead.
-
-## Docker / Hugging Face Spaces Deployment
-
-The Dockerfile builds the frontend with Node 20, then creates a Python runtime image. It installs CPU-only PyTorch and Python dependencies, copies the built frontend into `frontend/dist`, exposes port `7860`, and runs `python production_start.py` to supervise the API and one concurrency-1 Celery worker.
-Set `CELERY_BROKER_URL` as a Hugging Face Space secret so both the API publisher and worker use the external RabbitMQ broker.
-
-Build and run locally:
-
-```powershell
-docker build -t intelligent-document-query-engine .
-docker run --rm -p 7860:7860 `
-  --env GROQ_API_KEY=your_groq_api_key `
-  --env API_TOKEN=your_operational_health_token `
-  --env ACCESS_JWT_SECRET=replace-with-at-least-32-random-bytes `
-  --env DATABASE_URL=your_database_url `
-  --env DB_CA_CERT_B64=your_base64_encoded_ca_certificate `
-  intelligent-document-query-engine
-```
-
-For Hugging Face Spaces:
-
-- Use the Docker SDK.
-- Configure `DATABASE_URL`, `DB_CA_CERT_B64`, `GROQ_API_KEY`,
-  `ACCESS_JWT_SECRET`, and the operational `API_TOKEN` as Space secrets.
-- Set `AUTH_ALLOWED_ORIGINS` to the exact public Space origin when required by
-  the hosting proxy; it is configuration, not a secret.
-- Store the MySQL/Aiven CA certificate as `DB_CA_CERT_B64`; do not commit `certs/*.pem`.
-- Keep `app_port: 7860` in the README front matter.
-- The built React frontend is served by FastAPI from the same origin.
-- The live Hugging Face Space uses Aiven MySQL over verified TLS and serves the
-  production React build and API from one origin.
-
-## API Surface
-
-### Authentication endpoints
-
-| Method and route | Purpose |
+| Method and route | Contract |
 | --- | --- |
-| `POST /auth/register` | Normalize email, create a password account, and start a session. |
-| `POST /auth/login` | Verify credentials and start a session. |
-| `POST /auth/refresh` | Rotate the browser-managed refresh credential and issue a new access JWT. |
-| `POST /auth/logout` | Revoke and clear the current refresh session. |
-| `GET /auth/me` | Return the current user's public account fields. |
+| `POST /auth/register`, `POST /auth/login` | Email/password authentication; access-token JSON and refresh cookie. No access JWT required. |
+| `POST /auth/refresh`, `POST /auth/logout` | Rotate or revoke the browser refresh credential; no access JWT required. |
+| `GET /auth/me` | Current DB-backed public user. |
+| `POST /documents/upload` | Multipart `file` (required), `upload_request_id` (optional UUID; strongly recommended), `allow_duplicate` (boolean, default false). |
+| `GET /documents/{document_id}` | `document_id`, `filename`, `status`, `error_message`, `created_at`, `updated_at`. |
+| `POST /documents/{document_id}/queries` | JSON `{"question":"..."}`; returns `QueryResponse` with an `answers` list. |
+| `POST /hackrx/run` | Legacy synchronous URL path: JSON `documents` URL and `questions` list. |
+| `POST /hackrx/upload-run` | Legacy synchronous multipart `file`, `questions_json`, optional `request_id`; separate response-recovery contract. |
+| `GET /history/documents` | Owned documents; bounded `limit`. |
+| `GET /history/documents/{document_id}/queries` | Owned document's queries; bounded `limit`. |
+| `GET /history/queries/{query_id}/citations` | Owned query's citations. |
+| `GET /health` | Public process/model/cache information; not a broker/worker/storage readiness probe. |
+| `GET /health/db` | DB connectivity diagnostic requiring the separate operational `API_TOKEN`. |
 
-Registration, login, and refresh return a ten-minute access JWT in JSON. The
-opaque refresh credential is confined to the host-only `idqe_refresh` cookie
-with `HttpOnly`, `Secure`, `SameSite=Lax`, and `Path=/auth`. The React client
-keeps each tab's access JWT in memory, restores sessions on page load, and
-retries an authenticated request at most once after refresh. It never reads the
-refresh cookie or persists/shares an access token.
+Async upload success returns `{document_id, filename, status}`: 202 for new work or recovered queued/processing work, 200 for recovered ready/failed documents. Invalid PDF input or UUID yields 400; missing/invalid form structure can yield 422. Both content duplication and request-ID reuse with different bytes use 409, but only the former has `code: duplicate_document`; the latter uses `detail`. Infrastructure errors use 503 with `message` and optional `document_id`/`status`. Object keys and infrastructure configuration are absent from these projections.
 
-### Document, RAG, and history endpoints
+Status/query lookup of a missing or differently owned document returns 404. Querying queued/processing/failed documents returns 409; query infrastructure/artifact failures return 503. A successful query response includes answer `question`, `answer`, `status`, `sources`, and `claim_verifications`. The legacy routes retain their existing synchronous behavior and do not store a source PDF through the async object-storage path.
 
-| Method and route | Purpose |
+## Local development and deployment
+
+Start with [the setup and deployment guide](docs/deployment.md), including the complete configuration table. Use Python 3.11 and Node 20 to match the Dockerfile.
+
+For the local Compose topology, copy `.env.example` to `.env`, configure a **shared reachable MySQL database**, JWT/Groq secrets and database TLS, then initialize a fresh database explicitly:
+
+```powershell
+Copy-Item .env.example .env
+# Fill .env locally before continuing. Never commit it.
+docker compose build
+docker compose run --rm --no-deps api python scripts/init_db.py
+docker compose up rabbitmq api worker
+```
+
+Open `http://localhost:7860`. For plain-HTTP development set `REFRESH_COOKIE_SECURE=false` in `.env`. Existing MySQL databases need [migrations 001-005](docs/persistence_schema.md), not just `create_all`. Compose does not provision MySQL and does not share its default SQLite file between containers. Both app services share the `document-objects` volume and the same RabbitMQ URL; the worker uses concurrency 1.
+
+For host Python/Vite development, use the guide's separate terminals. The Vite proxy targets API port **8000**; `start.py` and Docker default to **7860**. This distinction matters when starting the backend yourself.
+
+Production uses `production_start.py` to run `start.py` plus one Celery worker. The supervisor forwards SIGTERM/SIGINT and stops the sibling process if either child exits. API and worker responsibilities could be deployed and scaled separately using the same task/data contract; they are currently co-resident and are not independently scaled in the Space.
+
+## Design choices and scope
+
+| Choice | Reason for this workload |
 | --- | --- |
-| `POST /documents/upload` | Store a private PDF, create an owned queued document, and publish its ID for background ingestion. |
-| `GET /documents/{document_id}` | Return the owned document's current ingestion lifecycle status. |
-| `POST /documents/{document_id}/queries` | Query a ready owned document using its persisted chunks and embeddings. |
-| `POST /hackrx/run` | Run the RAG pipeline against a PDF URL. |
-| `POST /hackrx/upload-run` | Run the pipeline against an uploaded PDF; accepts an optional idempotent `request_id`. |
-| `GET /history/documents` | List documents owned by the JWT subject. |
-| `GET /history/documents/{document_id}/queries` | List queries for an owned document. |
-| `GET /history/queries/{query_id}/citations` | Return citations for an owned query. |
+| RabbitMQ | Acknowledged work-queue delivery suits discrete ingestion jobs. A replayable Kafka event log is not required by the current application contract. |
+| Celery | Provides task registration, worker execution, retry scheduling, and acknowledgement controls. Prefetch is limited to one per worker slot. |
+| Object storage | Retains large source binaries independently of compute; keeps PDF bytes out of RabbitMQ and relational rows. |
+| MySQL | Holds ownership, authentication, lifecycle, artifacts, and history with transactional state changes. |
+| FAISS | Provides simple per-document vector search in process; persisted embeddings are the recoverable source of truth. |
 
-All of these routes require `Authorization: Bearer <access JWT>`. Ownership is
-derived exclusively from the validated JWT subject. A private document or query
-owned by someone else is returned as not found.
+Kafka, Kubernetes, Redis, and an external vector database were intentionally not added. The current scope uses a task queue, relational persistence, and local vector indexes; additional infrastructure should answer a measured workload or operational requirement.
 
-The asynchronous upload route accepts multipart `file` and optional
-`upload_request_id` fields. It returns 202 for queued/processing work and may
-return 200 when the same request UUID recovers an already-ready or failed
-document. Responses never expose object keys or storage/broker configuration.
-The frontend generates and reuses an `upload_request_id`:
-that UUID is the recovery mechanism if the database commit succeeds but the
-process exits before task publication. Reusing it with different PDF bytes
-returns HTTP 409.
+## Known limitations
 
-A visible RabbitMQ publication error returns HTTP 503 with the authoritative
-`document_id`. The source PDF is retained and the document remains `queued`
-because publisher-confirmation failures can be ambiguous. Retrying the same
-upload request UUID safely republishes the document ID. A process crash in the
-small interval between DB commit and publication can leave a queued row without
-a message; no transactional outbox or reconciler exists yet.
+- No OCR for image-only/scanned PDFs; text cleaning and table extraction can lose useful evidence.
+- At-least-once task delivery can repeat work. No atomic DB/broker commit, outbox, queued-row reconciler, or exactly-once execution guarantee.
+- Content checking is not serialized across different upload UUIDs; query retries have no idempotency key.
+- FAISS/cache state is process-local and rebuilt after restart. There is no distributed FAISS layer, and the entry bound is not a byte-level memory limit.
+- HF runs API and a concurrency-1 worker together, sharing CPU/RAM and container lifetime.
+- Query history is best effort. Source objects are retained without a user deletion/download endpoint or an automatic orphan-cleanup job.
+- The retrieval benchmark is small; answer and claim verification can be wrong. No production throughput or latency guarantee is made.
+- URL ingestion accepts caller-selected destinations without a dedicated SSRF/egress policy in the code. Account rate limiting, email verification, password reset, and MFA are outside the implemented scope.
 
-Example URL request:
+## Verification and documentation map
 
-```json
-{
-  "documents": "https://example.com/document.pdf",
-  "questions": [
-    "What is this document about?",
-    "What are the key exclusions?"
-  ]
-}
-```
-
-The upload route accepts these multipart fields:
-
-- `file`: PDF file upload.
-- `questions_json`: JSON array of question strings.
-- `request_id`: optional client-generated UUID used to recover a successfully
-  committed response after a lost HTTP response.
-
-For uploads, the cache order is RAM, then MySQL chunks/embeddings, then complete
-PDF extraction and embedding. A committed `request_id` retry returns the stored
-answer without rerunning the RAG pipeline. Reusing an ID with different
-questions or a different PDF returns HTTP 409.
-
-### Operational endpoints
-
-- `GET /health` exposes non-sensitive service and model/cache readiness.
-- `GET /health/db` performs a safe database connectivity check and is the only
-  route protected by the separate operational `API_TOKEN`. User access JWTs do
-  not grant access to it.
-
-## Security Notes
-
-- Do not commit `.env`, `.env.local`, or real API keys.
-- Do not commit database credentials or CA certificates.
-- Passwords use Argon2id; raw passwords and refresh tokens are never stored.
-- Access JWTs are short-lived and held only in frontend memory. Refresh tokens
-  are browser-managed `HttpOnly` cookies backed by revocable database sessions.
-- Query and history endpoints require an access JWT. The operational
-  `API_TOKEN` is separate from user authentication and applies only to
-  `/health/db`.
-- Cookie-backed auth POSTs reject untrusted browser origins using `Origin` or
-  `Referer` validation in addition to `SameSite=Lax` cookie behavior.
-- Production sends an enforcing CSP covering scripts, styles, images, fonts,
-  connections, frames, forms, objects, and base URIs. It allows neither
-  `unsafe-inline` nor `unsafe-eval`; React renders model and document text as
-  text rather than executable HTML.
-- Auth responses containing credentials use `Cache-Control: no-store`; raw
-  refresh tokens never appear in JSON.
-- URL ingestion downloads caller-provided PDFs, so deployment environments should consider network egress and SSRF risk policies.
-
-## Persistence and Schema
-
-Production persistence uses Aiven MySQL/InnoDB over verified TLS. The schema
-contains users, rotating `refresh_sessions`, user-owned documents/chunks/
-queries/citations, persisted embeddings, and upload `request_id` idempotency.
-Foreign keys and ownership-aware queries keep account data isolated.
-
-The idempotent MySQL migrations are retained in numeric order under
-`migrations/mysql/`. Migration 001 adds persisted embeddings and request
-recovery; migration 002 introduces the production multi-user authentication
-schema and cleans obsolete placeholder-era data. Migration 003 adds nullable
-private-object metadata. Migration 004 converts completed legacy `ingested`
-rows to `ready` and establishes `queued` as the default for future documents.
-Migration 005 adds the owned asynchronous-upload idempotency UUID.
-The migrations have dedicated guarded
-rehearsal and real-MySQL integration coverage. New databases are initialized
-without seeded user identities. Schema details and verification queries live in
-[`docs/persistence_schema.md`](docs/persistence_schema.md); operational gates are
-in [`docs/production_readiness.md`](docs/production_readiness.md).
-
-## Limitations
-
-- PDF extraction depends on embedded text; scanned/image-only PDFs are not OCR-processed.
-- FAISS indexes remain in memory and are reconstructed from persisted upload
-- In-memory caches are process-local, bounded, and cleared on restart; their
-  keys include user identity so cached artifacts cannot cross account scopes.
-- Retrieval quality is improved but not perfect; remaining misses are documented in the benchmark summary.
-
-## Verification Commands
-
-Backend tests and Python compilation:
+From an activated Python environment at the repository root:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q
-.venv\Scripts\python.exe -m compileall -q main.py backend persistence eval scripts tests
-.venv\Scripts\python.exe -m pip check
-```
-
-Frontend tests and production build:
-
-```powershell
-cd frontend
+python -m pytest -q
+python -m compileall -q main.py backend persistence eval scripts tests
+python -m compileall -q start.py production_start.py
+python -m pip check
+python -c "import main, production_start, backend.app.celery_app; print('Imports OK')"
+git diff --check
+docker compose config --quiet
+Push-Location frontend
 npm test
 npm run build
+Pop-Location
 ```
 
-Repository whitespace check:
+The MySQL integration tests are opt-in and destructive to an explicitly selected disposable test database. Ordinary skipped runs do not verify InnoDB concurrency. Tests use fakes for model/broker/storage boundaries; this suite is not a production benchmark or live provider smoke test.
 
-```powershell
-git diff --check
-```
+| Guide | Focus |
+| --- | --- |
+| [Architecture](docs/architecture.md) | Components, sequences, lifecycle, cache, ownership |
+| [Failure modes](docs/failure_modes.md) | Persisted state, retry behavior, and failure windows |
+| [Ingestion worker](docs/document_ingestion_worker.md) | Message contract, acknowledgements, retries |
+| [Persistence schema](docs/persistence_schema.md) | Tables, constraints, transaction boundaries, migrations |
+| [Deployment and configuration](docs/deployment.md) | HF/Compose/host startup, settings, release workflow |
+| [Security](docs/security.md) | Authentication, authorization, trust boundaries |
+| [Production readiness](docs/production_readiness.md) | Operational checks and test scope |
+| [Retrieval evaluation](docs/retrieval_evaluation.md) | Preserved measurements and methodology |

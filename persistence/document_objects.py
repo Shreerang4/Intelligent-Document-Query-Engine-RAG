@@ -134,7 +134,7 @@ def get_document_object_metadata(
     *,
     document_id: str,
 ) -> Optional[StoredDocumentObjectMetadata]:
-    """Internal lookup for a future worker that receives only a document ID."""
+    """Internal source-metadata lookup by document ID, without an HTTP projection."""
     from persistence.db import SessionLocal
     from persistence.models import Document
 

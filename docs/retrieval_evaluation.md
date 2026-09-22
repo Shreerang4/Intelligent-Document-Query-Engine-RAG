@@ -5,8 +5,8 @@ This document summarizes the completed retrieval-quality stage for the Intellige
 ## Benchmark
 
 - Corpus: annual reports for Infosys, HDFC Bank, and Bajaj Finance.
-- Questions: 33 labeled benchmark questions.
-- Question types: lexical, paraphrase, conceptual, and distractor.
+- Questions: 33 labeled benchmark questions: 24 answerable and 9 unanswerable, with 11 questions per document.
+- Answerable question types: lexical, paraphrase, conceptual, and distractor (6 each). The remaining 9 are labeled unanswerable.
 - Modes measured: MiniLM baseline, E5-small-v2, and E5+BM25 hybrid ablation.
 - Metrics: Recall@3, Recall@5, MRR, needs_review count, retrieval latency, and ingestion/indexing time.
 - Evaluation setting: retrieval-only (`--no-llm`), so metrics measure retrieval/reranking without Groq answer generation.
@@ -21,18 +21,18 @@ This document summarizes the completed retrieval-quality stage for the Intellige
 
 ## Decision
 
-E5-small-v2 is the current default embedder in the GitHub repo. It improves R@5 from 62.5% to 70.8%, improves MRR, and reduces needs_review from 7 to 4. CPU ingestion is slower than MiniLM, so MiniLM remains available as a fallback/baseline for speed or cost-sensitive runs.
+E5-small-v2 is the current default embedder in the GitHub repo. It improves R@5 from 62.5% to 70.8%, improves MRR, and reduces needs_review from 7 to 4. The recorded CPU ingestion was slower than MiniLM, so MiniLM remains an explicitly configured alternative/baseline; there is no automatic fallback on E5 failure.
 
 ## Final Shipped Configuration
 
 - Embedder: `intfloat/e5-small-v2` by default.
-- MiniLM fallback: `all-MiniLM-L6-v2` via `EMBEDDING_MODEL_NAME`.
+- MiniLM alternative/baseline: `all-MiniLM-L6-v2` via `EMBEDDING_MODEL_NAME`.
 - Retrieval mode: `faiss_reranker`.
 - Initial FAISS candidates: `k_initial=20`.
 - Final reranked chunks: `k_final=8`.
 - Reranker: `cross-encoder/ms-marco-TinyBERT-L-2-v2`.
 
-The eval harness and production pipeline now use the same `k_final=8`, so the benchmark measures the shipped final-context configuration.
+The default FAISS/reranker adapter and application path both use `k_final=8`. The experimental hybrid branch has separate defaults (`HYBRID_E5_K_INITIAL=30`, `HYBRID_BM25_K_INITIAL=20`, `HYBRID_K_FINAL=5`). Matching default retrieval settings does not mean these historical runs measure the async API, broker, database or deployed hardware.
 
 Default E5 run:
 
@@ -40,7 +40,7 @@ Default E5 run:
 $env:EMBEDDING_MODEL_NAME='intfloat/e5-small-v2'
 ```
 
-MiniLM fallback/baseline:
+MiniLM alternative/baseline:
 
 ```powershell
 $env:EMBEDDING_MODEL_NAME='all-MiniLM-L6-v2'
@@ -103,6 +103,41 @@ This was one of the E5 rescues. Hybrid reranking changed the merged candidate or
 
 ## Recommendation
 
-Use E5-small-v2 as the default retrieval embedder in the GitHub repo, while keeping MiniLM configurable as the fallback/baseline. Keep E5+BM25 hybrid as an ablation until there is a better merge/rerank strategy that improves q08 without losing E5 semantic rescues or adding unacceptable latency.
+Use E5-small-v2 as the default retrieval embedder in the GitHub repo, while keeping MiniLM configurable as an alternative/baseline. Keep E5+BM25 hybrid as an ablation until there is a better merge/rerank strategy that improves q08 without losing E5 semantic rescues or adding unacceptable latency.
 
-The Hugging Face live demo may lag behind this GitHub repo until the Space is manually synced.
+The Space is released manually through its separate `hf/main` history. Deployment commit and runtime checks are separate from retrieval evaluation; see [deployment](deployment.md).
+
+## Metric definitions and measurement scope
+
+The committed labels are in `eval/benchmark/questions.json`, scoring in `eval/metrics.py`, and orchestration in `eval/runner.py` / `eval/pipeline_adapter.py`.
+
+- A retrieval hit is a normalized supporting-text substring in a chunk **or** a chunk whose page belongs to the labeled supporting pages. The page fallback can credit text that is on a relevant page without containing the exact answer.
+- Recall@3/5 is the fraction of answerable questions with at least one hit in the first 3/5 ranked chunks. It is not the fraction of all relevant chunks retrieved. Unanswerable questions have no gold retrieval evidence and are excluded from recall/MRR.
+- MRR averages reciprocal rank of the first hit over answerable questions, contributing zero for no hit in the returned ranking.
+- `needs_review` identifies answerable questions with no hit across the returned rankings of all evaluated baseline modes. It is not simply `24 * (1 - Recall@5)` and is not an answer-factuality score.
+- Latency percentiles use nearest rank. The harness times retrieval operations locally; model initialization may occur outside individual retrieval timers. Its first/subsequent-query comparison is not an HTTP cold-start measurement.
+- `--no-llm` disables answer generation. It cannot establish abstention accuracy, key-fact answer correctness, citation faithfulness or claim-verification quality.
+
+The adapter reads local PDFs and builds vectors/FAISS directly, bypassing HTTP/auth and the API document cache. The timing table preserves the previously committed measurements unchanged. There are no committed raw result reports under `eval/results/` beyond `.gitkeep`; that directory is ignored. Exact historical hardware, dependency/model revisions and full raw records are not captured in this summary, so the numbers are evidence of those recorded experiments rather than a reproducibility or capacity guarantee.
+
+## Reproduction commands (not a production benchmark)
+
+From an activated Python environment at the repository root, use one configuration per run. These commands run retrieval experiments; run them separately from routine tests and compare results only with their configuration and environment recorded.
+
+```powershell
+$env:RETRIEVAL_MODE='faiss_reranker'
+$env:EMBEDDING_MODEL_NAME='all-MiniLM-L6-v2'
+python eval/runner.py --no-llm --out eval/results/minilm
+
+$env:EMBEDDING_MODEL_NAME='intfloat/e5-small-v2'
+python eval/runner.py --no-llm --out eval/results/e5
+
+$env:RETRIEVAL_MODE='e5_bm25_reranker'
+python eval/runner.py --no-llm --out eval/results/e5_bm25
+```
+
+Model downloads and benchmark PDFs must be available locally. The GitHub tree contains the three annual-report PDFs; the HF deployment tree omits them. Keep generated reports out of commits unless intentionally selecting a sanitized, documented artifact for review.
+
+## Limits of interpretation
+
+This is a small, fixed financial-report corpus, with labels and repeated ablations that can favor choices specific to it. Broad page matching, extracted-table quality, cleaning of numeric/symbol-heavy lines, candidate selection, and reranker order affect results. Small-sample p95 is noisy. Recorded timings do not measure HTTP upload, object storage, queue wait, worker startup, database persistence, Groq generation/verification, concurrent users, or the live Space. Larger-model comparisons above are historical observations, not universal rankings or newly verified performance claims.

@@ -1,20 +1,68 @@
-.dockerignore
-.gitignore
-Dockerfile
+Curated repository overview (not an exhaustive generated inventory).
+See MANIFEST.md for responsibilities and docs/deployment.md for packaging.
+
+README.md
+MANIFEST.md
 FILE_TREE.txt
+.env.example
+.gitignore
+.dockerignore
+Dockerfile
+compose.yaml
+requirements.txt
+pytest.ini
+start.py
+production_start.py
+main.py
+backend/
+  app/
+    auth/
+    documents/
+    rag/
+    schemas/
+    services/
+    storage/
+    tasks/
+    celery_app.py
+    celery_config.py
+    security_headers.py
+persistence/
+migrations/
+  mysql/                 # migrations 001 through 005
+scripts/
+  init_db.py
 frontend/
   .env.example
-  index.html
-  package-lock.json
   package.json
-  src/
-    App.css
-    App.jsx
-    index.css
-    main.jsx
+  package-lock.json
   vite.config.js
-main.py
-MANIFEST.md
-README.md
-requirements.txt
-start.py
+  index.html
+  src/
+    api/
+    auth/
+    App.jsx
+    App.css
+    main.jsx
+    index.css
+  tests/
+tests/
+eval/
+  benchmark/
+    docs/                # benchmark PDFs in GitHub; omitted from HF tree
+    questions.json
+    questions.sample.json
+  metrics.py
+  test_metrics.py
+  pipeline_adapter.py
+  runner.py
+  results/               # generated/ignored except .gitkeep
+  ...                    # lexical, PRF, probe and diagnostic tools
+docs/
+  architecture.md
+  deployment.md
+  document_ingestion_worker.md
+  failure_modes.md
+  persistence_schema.md
+  production_readiness.md
+  retrieval_evaluation.md
+  security.md

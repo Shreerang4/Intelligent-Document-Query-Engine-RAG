@@ -128,7 +128,7 @@ def mysql_document_lock(
 
 
 def get_session() -> Iterator[Session]:
-    """Yield a SQLAlchemy session for future API dependencies."""
+    """Yield a SQLAlchemy session for API dependencies."""
     session = SessionLocal()
     try:
         yield session
