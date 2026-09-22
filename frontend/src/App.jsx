@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { API_BASE_URL, getErrorMessage, rawApiFetch, readResponseBody } from './api/client.js';
-import { getDocumentStatus, queryDocument, uploadDocument } from './api/documentWorkflow.js';
+import { DuplicateDocumentError, getDocumentStatus, queryDocument, uploadDocument } from './api/documentWorkflow.js';
 import AuthScreen from './auth/AuthScreen.jsx';
 import { useAuth } from './auth/AuthContext.jsx';
 import './App.css';
@@ -75,6 +75,7 @@ function AuthenticatedApp() {
   const [documentUrl, setDocumentUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
   const [uploadedDocument, setUploadedDocument] = useState(null);
+  const [duplicateDocument, setDuplicateDocument] = useState(null);
   const [pollingError, setPollingError] = useState('');
   const [questionsText, setQuestionsText] = useState('');
   const [answers, setAnswers] = useState([]);
@@ -237,6 +238,7 @@ function AuthenticatedApp() {
     setRequestError('');
     setPollingError('');
     setUploadedDocument(null);
+    setDuplicateDocument(null);
     setAnswers([]);
     pendingUploadRequestRef.current = null;
 
@@ -262,6 +264,7 @@ function AuthenticatedApp() {
     setDocumentUrl('');
     setSelectedFile(null);
     setUploadedDocument(null);
+    setDuplicateDocument(null);
     setPollingError('');
     setQuestionsText('');
     setAnswers([]);
@@ -286,6 +289,7 @@ function AuthenticatedApp() {
 
     if (mode === 'upload') {
       if (!uploadReady) {
+        if (duplicateDocument) return 'Choose Open existing or Upload again.';
         if (uploadProcessing) return 'Document is still processing.';
         if (!selectedFile) return 'Please choose a PDF file to upload.';
         return '';
@@ -317,17 +321,7 @@ function AuthenticatedApp() {
       let response;
 
       if (mode === 'upload' && !uploadReady) {
-        const pendingRequest = pendingUploadRequestRef.current;
-        const requestId = pendingRequest?.file === selectedFile
-          ? pendingRequest.requestId
-          : crypto.randomUUID();
-        pendingUploadRequestRef.current = { file: selectedFile, requestId };
-        const generation = uploadGenerationRef.current;
-        const document = await uploadDocument(authenticatedFetch, selectedFile, requestId);
-        if (generation !== uploadGenerationRef.current) return;
-        setUploadedDocument(document);
-        setPollingError('');
-        pendingUploadRequestRef.current = null;
+        await submitUpload(false);
         return;
       }
 
@@ -371,7 +365,50 @@ function AuthenticatedApp() {
       });
       await refreshHealth();
     } catch (error) {
-      setRequestError(error instanceof Error ? error.message : 'Request failed.');
+      handleUploadError(error);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function submitUpload(allowDuplicate) {
+    const pendingRequest = pendingUploadRequestRef.current;
+    const requestId = pendingRequest?.file === selectedFile
+      ? pendingRequest.requestId
+      : crypto.randomUUID();
+    pendingUploadRequestRef.current = { file: selectedFile, requestId };
+    const generation = uploadGenerationRef.current;
+    const document = await uploadDocument(authenticatedFetch, selectedFile, requestId, allowDuplicate);
+    if (generation !== uploadGenerationRef.current) return;
+    setUploadedDocument(document);
+    setDuplicateDocument(null);
+    setPollingError('');
+    pendingUploadRequestRef.current = null;
+  }
+
+  function handleUploadError(error) {
+    if (error instanceof DuplicateDocumentError) {
+      setDuplicateDocument(error.document);
+      return;
+    }
+    setRequestError(error instanceof Error ? error.message : 'Request failed.');
+  }
+
+  function handleOpenExisting() {
+    setUploadedDocument(duplicateDocument);
+    setDuplicateDocument(null);
+    setPollingError('');
+    setRequestError('');
+    pendingUploadRequestRef.current = null;
+  }
+
+  async function handleUploadAgain() {
+    setIsSubmitting(true);
+    setRequestError('');
+    try {
+      await submitUpload(true);
+    } catch (error) {
+      handleUploadError(error);
     } finally {
       setIsSubmitting(false);
     }
@@ -511,6 +548,21 @@ function AuthenticatedApp() {
             </div>
           ) : null}
 
+          {mode === 'upload' && duplicateDocument ? (
+            <div className="notice duplicate-confirmation" role="alertdialog" aria-labelledby="duplicate-title">
+              <strong id="duplicate-title">You've already uploaded this document.</strong>
+              <p>{duplicateDocument.filename || 'Existing PDF'} · {duplicateDocument.status}</p>
+              <div className="actions">
+                <button type="button" className="secondary-button" onClick={handleOpenExisting} disabled={isSubmitting}>
+                  Open existing
+                </button>
+                <button type="button" className="primary-button" onClick={() => void handleUploadAgain()} disabled={isSubmitting}>
+                  {isSubmitting ? 'Uploading...' : 'Upload again'}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           <label className="field">
             <span className="field-label">{mode === 'upload' ? 'Question' : 'Questions'}</span>
             <textarea
@@ -532,7 +584,7 @@ function AuthenticatedApp() {
           {formError ? <div className="notice notice-error">{formError}</div> : null}
 
           <div className="actions">
-            <button type="submit" className="primary-button" disabled={isSubmitting || (mode === 'upload' && uploadProcessing)}>
+            <button type="submit" className="primary-button" disabled={isSubmitting || (mode === 'upload' && (uploadProcessing || Boolean(duplicateDocument)))}>
               {isSubmitting
                 ? mode === 'upload' && !uploadReady ? 'Uploading...' : 'Running query...'
                 : mode === 'upload' && !uploadReady ? 'Upload PDF' : 'Run Query'}

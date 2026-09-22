@@ -15,6 +15,11 @@ class DocumentUploadResponse(BaseModel):
     status: DocumentLifecycleStatus
 
 
+class DuplicateDocumentResponse(BaseModel):
+    code: Literal["duplicate_document"] = "duplicate_document"
+    document: DocumentUploadResponse
+
+
 class DocumentStatusResponse(DocumentUploadResponse):
     error_message: Optional[str]
     created_at: datetime

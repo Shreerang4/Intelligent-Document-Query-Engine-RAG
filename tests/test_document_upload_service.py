@@ -22,6 +22,7 @@ from backend.app.services import document_upload as upload_service
 from backend.app.services.document_upload import (
     DocumentUploadConflictError,
     DocumentUploadUnavailableError,
+    DuplicateDocumentError,
     InvalidDocumentUploadError,
     create_document_upload,
 )
@@ -414,3 +415,130 @@ def test_unique_race_deletes_losing_object_and_uses_winner(monkeypatch, session_
     assert len(storage.deleted) == 1
     assert storage.objects == {}
     assert enqueued == [winner.document_id]
+
+
+@pytest.mark.parametrize("status", [DOCUMENT_STATUS_READY, DOCUMENT_STATUS_QUEUED, DOCUMENT_STATUS_PROCESSING])
+def test_same_owner_duplicate_has_no_new_side_effects(session_factory, status) -> None:
+    factory, user_id = session_factory
+    storage = RecordingStorage()
+    enqueued: list[str] = []
+    first = create_document_upload(
+        user_id=user_id, filename="original.pdf", content_type="application/pdf",
+        pdf_bytes=PDF_BYTES, upload_request_id=str(uuid.uuid4()),
+        object_storage=storage,
+        enqueue=lambda document_id: enqueued.append(document_id) or "task-id",
+    )
+    with factory() as session:
+        session.get(Document, first.document.document_id).status = status
+        session.commit()
+    storage.events.clear()
+    enqueued.clear()
+
+    with pytest.raises(DuplicateDocumentError) as raised:
+        create_document_upload(
+            user_id=user_id, filename="renamed.pdf", content_type="application/pdf",
+            pdf_bytes=PDF_BYTES, upload_request_id=str(uuid.uuid4()),
+            object_storage=storage,
+            enqueue=lambda document_id: enqueued.append(document_id) or "task-id",
+        )
+
+    assert raised.value.document.document_id == first.document.document_id
+    assert raised.value.document.filename == "original.pdf"
+    assert raised.value.document.status == status
+    assert storage.events == []
+    assert enqueued == []
+    with factory() as session:
+        assert session.query(Document).count() == 1
+
+
+def test_failed_match_and_other_users_hash_do_not_block_upload(session_factory) -> None:
+    factory, user_id = session_factory
+    storage = RecordingStorage()
+    first = create_document_upload(
+        user_id=user_id, filename="failed.pdf", content_type="application/pdf",
+        pdf_bytes=PDF_BYTES, upload_request_id=None, object_storage=storage,
+        enqueue=lambda _document_id: "task-id",
+    )
+    with factory() as session:
+        session.get(Document, first.document.document_id).status = DOCUMENT_STATUS_FAILED
+        other = User(id=str(uuid.uuid4()), email="other-duplicate@example.test")
+        session.add(other)
+        session.commit()
+        other_id = other.id
+
+    retry = create_document_upload(
+        user_id=user_id, filename="retry.pdf", content_type="application/pdf",
+        pdf_bytes=PDF_BYTES, upload_request_id=None, object_storage=storage,
+        enqueue=lambda _document_id: "task-id",
+    )
+    other_upload = create_document_upload(
+        user_id=other_id, filename="other.pdf", content_type="application/pdf",
+        pdf_bytes=PDF_BYTES, upload_request_id=None, object_storage=storage,
+        enqueue=lambda _document_id: "task-id",
+    )
+    assert len({first.document.document_id, retry.document.document_id, other_upload.document.document_id}) == 3
+    with factory() as session:
+        assert session.query(Document).count() == 3
+
+
+def test_allow_duplicate_creates_new_document_but_same_request_still_recovers(session_factory) -> None:
+    factory, user_id = session_factory
+    storage = RecordingStorage()
+    enqueued: list[str] = []
+    first = create_document_upload(
+        user_id=user_id, filename="first.pdf", content_type="application/pdf",
+        pdf_bytes=PDF_BYTES, upload_request_id=str(uuid.uuid4()), object_storage=storage,
+        enqueue=lambda document_id: enqueued.append(document_id) or "task-id",
+    )
+    request_id = str(uuid.uuid4())
+    second = create_document_upload(
+        user_id=user_id, filename="second.pdf", content_type="application/pdf",
+        pdf_bytes=PDF_BYTES, upload_request_id=request_id, allow_duplicate=True,
+        object_storage=storage,
+        enqueue=lambda document_id: enqueued.append(document_id) or "task-id",
+    )
+    recovered = create_document_upload(
+        user_id=user_id, filename="retry.pdf", content_type="application/pdf",
+        pdf_bytes=PDF_BYTES, upload_request_id=request_id,
+        object_storage=storage,
+        enqueue=lambda document_id: enqueued.append(document_id) or "task-id",
+    )
+
+    assert second.document.document_id != first.document.document_id
+    assert recovered.document.document_id == second.document.document_id
+    assert recovered.recovered is True
+    assert len(storage.objects) == 2
+    with factory() as session:
+        assert session.query(Document).count() == 2
+
+
+def test_historical_matches_prefer_newest_active_then_newest_ready(session_factory) -> None:
+    factory, user_id = session_factory
+    storage = RecordingStorage()
+    ids = []
+    for status in (DOCUMENT_STATUS_READY, DOCUMENT_STATUS_PROCESSING, DOCUMENT_STATUS_QUEUED, DOCUMENT_STATUS_READY):
+        result = create_document_upload(
+            user_id=user_id, filename=f"{status}.pdf", content_type="application/pdf",
+            pdf_bytes=PDF_BYTES, upload_request_id=None, allow_duplicate=True,
+            object_storage=storage, enqueue=lambda _document_id: "task-id",
+        )
+        ids.append(result.document.document_id)
+        with factory() as session:
+            document = session.get(Document, result.document.document_id)
+            document.status = status
+            document.created_at = datetime(2026, 1, len(ids), tzinfo=timezone.utc)
+            session.commit()
+
+    source_hash = hashlib.sha256(PDF_BYTES).hexdigest()
+    selected = upload_service.upload_persistence.find_owned_usable_duplicate(
+        user_id=user_id, source_hash=source_hash,
+    )
+    assert selected.document_id == ids[2]
+    with factory() as session:
+        session.get(Document, ids[1]).status = DOCUMENT_STATUS_FAILED
+        session.get(Document, ids[2]).status = DOCUMENT_STATUS_FAILED
+        session.commit()
+    selected_ready = upload_service.upload_persistence.find_owned_usable_duplicate(
+        user_id=user_id, source_hash=source_hash,
+    )
+    assert selected_ready.document_id == ids[3]

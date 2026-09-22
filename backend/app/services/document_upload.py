@@ -46,6 +46,14 @@ class DocumentUploadConflictError(ValueError):
     """Raised when an upload request UUID is reused for different PDF bytes."""
 
 
+class DuplicateDocumentError(ValueError):
+    """Raised when the owner already has a usable document with these bytes."""
+
+    def __init__(self, document: upload_persistence.StoredDocumentStatus) -> None:
+        super().__init__("You've already uploaded this document.")
+        self.document = document
+
+
 class DocumentUploadUnavailableError(RuntimeError):
     """Safe infrastructure error that may include an authoritative document ID."""
 
@@ -178,6 +186,7 @@ def create_document_upload(
     content_type: Optional[str],
     pdf_bytes: bytes,
     upload_request_id: Optional[str],
+    allow_duplicate: bool = False,
     object_storage: Optional[ObjectStorage] = None,
     enqueue: Callable[[str], str] = enqueue_document_ingestion,
 ) -> DocumentUploadResult:
@@ -210,6 +219,19 @@ def create_document_upload(
             )
             _publish_if_queued(current, enqueue=enqueue)
             return DocumentUploadResult(document=current, recovered=True)
+
+    if not allow_duplicate:
+        try:
+            duplicate = upload_persistence.find_owned_usable_duplicate(
+                user_id=user_id,
+                source_hash=source_hash,
+            )
+        except Exception as exc:
+            raise DocumentUploadUnavailableError(
+                "Document duplicate check is temporarily unavailable."
+            ) from exc
+        if duplicate is not None:
+            raise DuplicateDocumentError(duplicate)
 
     document_id = str(uuid.uuid4())
     object_key = document_pdf_object_key(document_id)
@@ -267,6 +289,7 @@ def get_document_status(*, user_id: str, document_id: str) -> upload_persistence
 
 
 __all__ = [
+    "DuplicateDocumentError",
     "DocumentUploadConflictError",
     "DocumentUploadResult",
     "DocumentUploadUnavailableError",

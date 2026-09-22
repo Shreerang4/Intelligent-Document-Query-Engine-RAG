@@ -295,6 +295,15 @@
   margin-top: 10px;
 }
 
+.duplicate-confirmation {
+  margin-bottom: 20px;
+}
+
+.duplicate-confirmation p {
+  margin: 8px 0 0;
+  color: var(--muted-strong);
+}
+
 .field-input-file {
   padding: 12px;
 }

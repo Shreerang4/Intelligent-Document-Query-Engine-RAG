@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.storage.base import document_pdf_object_key, validate_object_key
@@ -120,6 +120,30 @@ def recover_owned_upload_request(
                 "upload_request_id was already used with a different document."
             )
         return _project_document(document)
+
+
+def find_owned_usable_duplicate(*, user_id: str, source_hash: str) -> Optional[StoredDocumentStatus]:
+    """Prefer the newest active match, then the newest ready match for this owner."""
+    from persistence.db import SessionLocal
+    from persistence.models import Document
+
+    active_statuses = (DOCUMENT_STATUS_QUEUED, DOCUMENT_STATUS_PROCESSING)
+    with SessionLocal() as session:
+        document = session.execute(
+            select(Document)
+            .where(
+                Document.user_id == user_id,
+                Document.source_hash == source_hash,
+                Document.status.in_((*active_statuses, DOCUMENT_STATUS_READY)),
+            )
+            .order_by(
+                case((Document.status.in_(active_statuses), 0), else_=1),
+                Document.created_at.desc(),
+                Document.id.desc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        return _project_document(document) if document is not None else None
 
 
 def create_or_recover_queued_upload(

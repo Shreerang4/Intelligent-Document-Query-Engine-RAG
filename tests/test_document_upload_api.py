@@ -96,8 +96,13 @@ def _headers(user_id: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_access_token(user_id)}"}
 
 
-def _upload(client, user_id: str, *, request_id: str | None = None, data: bytes = PDF_BYTES):
+def _upload(
+    client, user_id: str, *, request_id: str | None = None,
+    data: bytes = PDF_BYTES, allow_duplicate: bool = False,
+):
     form = {"upload_request_id": request_id} if request_id is not None else {}
+    if allow_duplicate:
+        form["allow_duplicate"] = "true"
     return client.post(
         "/documents/upload",
         headers=_headers(user_id),
@@ -290,3 +295,45 @@ def test_same_request_recovery_returns_actual_status_and_sensible_http_code(
     assert recovered.json()["document_id"] == document_id
     assert recovered.json()["status"] == lifecycle_status
     assert enqueued == ([document_id] if lifecycle_status == DOCUMENT_STATUS_QUEUED else [])
+
+
+@pytest.mark.parametrize("lifecycle_status", [DOCUMENT_STATUS_READY, DOCUMENT_STATUS_QUEUED, DOCUMENT_STATUS_PROCESSING])
+def test_duplicate_response_is_structured_and_creates_nothing(application, lifecycle_status) -> None:
+    client, factory, (user_id, _), storage, enqueued = application
+    first = _upload(client, user_id, request_id=str(uuid.uuid4()))
+    document_id = first.json()["document_id"]
+    with factory() as session:
+        session.get(Document, document_id).status = lifecycle_status
+        session.commit()
+    enqueued.clear()
+
+    duplicate = _upload(client, user_id, request_id=str(uuid.uuid4()))
+
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {
+        "code": "duplicate_document",
+        "document": {
+            "document_id": document_id,
+            "filename": "statement.pdf",
+            "status": lifecycle_status,
+        },
+    }
+    assert len(storage.objects) == 1
+    assert enqueued == []
+    with factory() as session:
+        assert session.query(Document).count() == 1
+
+
+def test_allow_duplicate_field_creates_a_new_owned_document(application) -> None:
+    client, factory, (user_id, _), storage, enqueued = application
+    first = _upload(client, user_id, request_id=str(uuid.uuid4()))
+    second = _upload(
+        client, user_id, request_id=str(uuid.uuid4()), allow_duplicate=True,
+    )
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["document_id"] != second.json()["document_id"]
+    assert len(storage.objects) == 2
+    assert len(enqueued) == 2
+    with factory() as session:
+        assert session.query(Document).count() == 2

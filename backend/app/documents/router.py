@@ -12,6 +12,7 @@ from backend.app.auth.dependencies import get_authenticated_user_id
 from backend.app.rag.config import get_max_pdf_bytes
 from backend.app.schemas.documents import (
     DocumentQueryRequest,
+    DuplicateDocumentResponse,
     DocumentStatusResponse,
     DocumentUploadResponse,
     DocumentUploadUnavailableResponse,
@@ -19,6 +20,7 @@ from backend.app.schemas.documents import (
 from backend.app.schemas.query import QueryResponse
 from backend.app.services.document_upload import (
     DocumentUploadConflictError,
+    DuplicateDocumentError,
     DocumentUploadUnavailableError,
     InvalidDocumentUploadError,
     create_document_upload,
@@ -48,6 +50,7 @@ def _unavailable_response(exc: DocumentUploadUnavailableError) -> JSONResponse:
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         status.HTTP_200_OK: {"model": DocumentUploadResponse},
+        status.HTTP_409_CONFLICT: {"model": DuplicateDocumentResponse},
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "model": DocumentUploadUnavailableResponse,
         },
@@ -57,6 +60,7 @@ async def upload_document(
     response: Response,
     file: Annotated[UploadFile, File(...)],
     upload_request_id: Annotated[Optional[str], Form()] = None,
+    allow_duplicate: Annotated[bool, Form()] = False,
     user_id: str = Depends(get_authenticated_user_id),
 ):
     try:
@@ -72,11 +76,21 @@ async def upload_document(
             content_type=file.content_type,
             pdf_bytes=pdf_bytes,
             upload_request_id=upload_request_id,
+            allow_duplicate=allow_duplicate,
         )
     except InvalidDocumentUploadError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DocumentUploadConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DuplicateDocumentError as exc:
+        payload = DuplicateDocumentResponse(
+            document=DocumentUploadResponse(
+                document_id=exc.document.document_id,
+                filename=exc.document.filename,
+                status=exc.document.status,
+            )
+        )
+        return JSONResponse(status_code=409, content=payload.model_dump(mode="json"))
     except DocumentUploadUnavailableError as exc:
         return _unavailable_response(exc)
 
